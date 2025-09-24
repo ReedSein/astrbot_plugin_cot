@@ -823,7 +823,7 @@ class IntelligentRetryWithCoT(Star):
                 except asyncio.CancelledError: pass
                 except Exception as e: logger.debug(f"清理并发任务时出现异常: {e}")
 
-    @filter.on_decorating_result(priority=100)
+    @filter.on_decorating_result(priority=5)
     async def final_cot_stripper(self, event: AstrMessageEvent, *args, **kwargs):
         """
         最终出口拦截器。
