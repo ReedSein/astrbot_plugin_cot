@@ -51,7 +51,7 @@ class IntelligentRetryWithCoT(Star):
         r'<(?P<tag>罗莎内心OS)>(?P<content>.*?)</(?P=tag)>',
         re.DOTALL
     )
-    FILTERED_KEYWORDS = ["呵呵，", "比利立我"]
+    FILTERED_KEYWORDS = ["呵呵，", "（……）"]
     # --- END: 整合逻辑 ---
 
     def __init__(self, context: Context, config: AstrBotConfig):
