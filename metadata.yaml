@@ -1,7 +1,7 @@
-name: intelligent_retry
-desc: 智能LLM重试插件，支持截断检测、并发重试、人格保持。修复人格丢失和TTS兼容性问题 (优化增强版)
-version: 2.9.9
-author: 木有知 & 长安某 (优化增强版)
+name: Rosa_intelligent_retry_with_cot
+desc: 集成了思维链(CoT)处理的智能重试插件（罗莎专属）
+version: 3.3.0
+author: ReedSein
 repo: https://github.com/muyouzhi6/astrbot_plugin_retry
 config:
   - key: enable_truncation_retry
@@ -22,6 +22,7 @@ config:
     options:
       - fixed
       - exponential
+
 
 
 
