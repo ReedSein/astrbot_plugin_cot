@@ -34,8 +34,8 @@ def sanitize_filename(session_id: str) -> str:
     return re.sub(r'[:\\/\*?"<>|]', '_', session_id)
 
 @register(
-    "intelligent_retry_with_cot",
-    "木有知 & 长安某 & AstrBot Architect",
+    "Rosaintelligent_retry_with_cot",
+    "ReedSein",
     "集成了思维链(CoT)处理的智能重试插件。采用[Session热数据] + [每日全量归档] 混合存储架构。",
     "3.6.0-Rosa-Hybrid",
 )
