@@ -1,6 +1,6 @@
 name: Rosa_intelligent_retry_with_cot
 desc: 集成了思维链(CoT)处理的智能重试插件（罗莎专属）
-version: 3.3.0
+version: 3.5.0
 author: ReedSein
 repo: https://github.com/muyouzhi6/astrbot_plugin_retry
 config:
@@ -22,6 +22,7 @@ config:
     options:
       - fixed
       - exponential
+
 
 
 
