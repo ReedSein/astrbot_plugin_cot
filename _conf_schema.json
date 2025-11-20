@@ -5,6 +5,30 @@
     "hint": "开启后，任何不包含<罗莎内心OS>和'最终的罗莎回复'结构的LLM响应都将被视为无效并触发重试。强烈建议为罗莎人格保持开启。",
     "default": true
   },
+  "history_limit": {
+    "description": "热数据保留条数",
+    "type": "int",
+    "hint": "在快速访问存储(JSON)中保留的最近内心OS记录数量。超出的记录仍会在每日全量归档中永久保存。",
+    "default": 100
+  },
+  "summary_provider_id": {
+    "description": "总结用小模型ID (Cogito)",
+    "type": "string",
+    "hint": "用于 /cogito 指令的专用模型ID（如 openai_2, ollama_1）。留空则默认使用当前会话的主模型。",
+    "default": ""
+  },
+  "summary_max_retries": {
+    "description": "总结任务重试次数",
+    "type": "int",
+    "hint": "小模型生成总结失败时的重试次数。建议设置为 1-2 次。",
+    "default": 2
+  },
+  "summary_prompt_template": {
+    "description": "日志总结提示词",
+    "type": "text",
+    "hint": "发送给小模型用于总结日志的提示词模板。{log} 会被替换为实际日志内容。",
+    "default": "请阅读以下机器人的'内心独白(Inner Thought)'日志，用简练、客观的语言总结其核心思考逻辑、情绪状态以及最终的决策意图。\n\n日志内容：\n{log}"
+  },
   "enable_truncation_retry": {
     "description": "启用截断重试",
     "type": "bool",
@@ -139,23 +163,5 @@
     "type": "int",
     "hint": "无论如何计算，并发数都不会超过此值。建议5-20之间。",
     "default": 10
-  },
-  "summary_provider_id": {
-    "description": "总结用小模型ID (Cogito)",
-    "type": "string",
-    "hint": "用于 /cogito 指令的专用模型ID（如 openai_2, ollama_1）。留空则使用当前会话的主模型。",
-    "default": ""
-  },
-  "summary_max_retries": {
-    "description": "总结任务重试次数",
-    "type": "int",
-    "hint": "小模型生成总结失败时的重试次数。建议设置为 1-2 次。",
-    "default": 2
-  },
-  "summary_prompt_template": {
-    "description": "日志总结提示词",
-    "type": "text",
-    "hint": "发送给小模型用于总结日志的提示词模板。{log} 会被替换为实际日志内容。",
-    "default": "请阅读以下机器人的'内心独白(Inner Thought)'日志，用简练、客观的语言总结其核心思考逻辑、情绪状态以及最终的决策意图。\n\n日志内容：\n{log}"
   }
 }
