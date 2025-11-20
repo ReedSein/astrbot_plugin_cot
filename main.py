@@ -22,83 +22,108 @@ COLD_ARCHIVE_DIR = Path("data/cot_os_logs/daily_archive")
 HOT_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 COLD_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 
-# --- HTML 渲染模板 (Jinja2) ---
-# 深色玻璃拟态风格，适配罗莎的神秘感
+# --- HTML 渲染模板 (IMAX HD Version) ---
 LOG_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <style>
+        /* 引入系统级字体栈，确保渲染清晰 */
         body {
-            font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif;
             background-color: #1a1a1a;
-            color: #e0e0e0;
-            padding: 20px;
-            display: flex;
-            justify-content: center;
-            align-items: flex-start;
             margin: 0;
+            padding: 0;
+            display: inline-block;
+            width: 100%;
         }
+        
+        .container {
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
         .card {
-            background: #2d2d2d;
-            border-radius: 12px;
-            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
-            border: 1px solid rgba(255, 255, 255, 0.05);
-            width: 500px; /* 固定宽度，适合手机查看 */
+            background: #252525;
+            border-radius: 16px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.08);
             overflow: hidden;
+            width: 100%; 
+            max-width: 800px;
+            margin: 0 auto;
         }
+
         .header {
-            background: linear-gradient(90deg, #4b6cb7 0%, #182848 100%);
-            padding: 15px 20px;
-            border-bottom: 1px solid #3d3d3d;
+            background: linear-gradient(135deg, #2c3e50 0%, #000000 100%);
+            padding: 25px 30px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
             display: flex;
             align-items: center;
             justify-content: space-between;
         }
+
         .title {
-            font-size: 18px;
-            font-weight: bold;
-            color: #fff;
-            letter-spacing: 1px;
+            font-size: 26px; 
+            font-weight: 800;
+            color: #ffffff;
+            letter-spacing: 0.5px;
+            -webkit-font-smoothing: antialiased;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.5);
         }
+
         .badge {
-            font-size: 12px;
-            background: rgba(0,0,0,0.3);
-            padding: 4px 8px;
-            border-radius: 4px;
-            color: #a0c4ff;
+            font-size: 16px;
+            font-weight: 600;
+            background: rgba(255, 255, 255, 0.15);
+            padding: 6px 14px;
+            border-radius: 8px;
+            color: #64b5f6;
+            backdrop-filter: blur(4px);
         }
+
         .content {
-            padding: 20px;
-            font-size: 15px;
+            padding: 35px;
+            font-size: 22px; /* 字号大幅提升，保证缩放后清晰 */
             line-height: 1.6;
-            white-space: pre-wrap; /* 保留换行 */
-            color: #d1d1d1;
+            color: #e0e0e0;
+            white-space: pre-wrap;
             text-align: justify;
+            font-weight: 400;
+            -webkit-font-smoothing: antialiased;
         }
+
         .footer {
-            padding: 12px 20px;
-            background: #252525;
-            border-top: 1px solid #333;
-            font-size: 12px;
-            color: #666;
+            padding: 20px 35px;
+            background: #1e1e1e;
+            border-top: 1px solid rgba(255, 255, 255, 0.05);
+            font-size: 15px;
+            color: #777;
             text-align: right;
-            font-family: monospace;
+            font-family: 'JetBrains Mono', Consolas, monospace;
         }
-        /* 简单的 Markdown 样式模拟 */
-        strong { color: #ff9f43; }
-        em { color: #54a0ff; font-style: normal; }
+
+        strong { color: #ffb74d; font-weight: 700; }
+        em { 
+            color: #4fc3f7; 
+            font-style: normal; 
+            background: rgba(79, 195, 247, 0.1);
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
     </style>
 </head>
 <body>
-    <div class="card">
-        <div class="header">
-            <span class="title">{{ title }}</span>
-            <span class="badge">{{ subtitle }}</span>
+    <div class="container">
+        <div class="card">
+            <div class="header">
+                <span class="title">{{ title }}</span>
+                <span class="badge">{{ subtitle }}</span>
+            </div>
+            <div class="content">{{ content }}</div>
+            <div class="footer">COGITO SYSTEM &bull; {{ timestamp }}</div>
         </div>
-        <div class="content">{{ content }}</div>
-        <div class="footer">Generated by Cogito System &bull; {{ timestamp }}</div>
     </div>
 </body>
 </html>
@@ -146,7 +171,7 @@ class IntelligentRetryWithCoT(Star):
         self.summary_prompt_template = config.get("summary_prompt_template", 
             "请阅读以下机器人的'内心独白(Inner Thought)'日志，用简练、客观的语言总结其核心思考逻辑、情绪状态以及最终的决策意图。\n\n日志内容：\n{log}")
 
-        logger.info(f"[IntelligentRetry] 3.8.0 图片渲染版已加载。")
+        logger.info(f"[IntelligentRetry] 3.8.1 高清渲染版已加载。")
 
     def _parse_config(self, config: AstrBotConfig) -> None:
         self.max_attempts = config.get("max_attempts", 3)
@@ -169,12 +194,11 @@ class IntelligentRetryWithCoT(Star):
         self.concurrent_retry_timeout = max(5, min(int(config.get("concurrent_retry_timeout", 30)), 300))
         self.truncation_detection_mode = config.get("truncation_detection_mode", "enhanced")
 
-    # ======================= 渲染辅助方法 (New) =======================
+    # ======================= 渲染辅助方法 (HD Optimized) =======================
 
     async def _render_and_reply(self, event: AstrMessageEvent, title: str, subtitle: str, content: str):
         """通用图片渲染与发送逻辑"""
         try:
-            # 准备模板数据
             render_data = {
                 "title": title,
                 "subtitle": subtitle,
@@ -182,15 +206,21 @@ class IntelligentRetryWithCoT(Star):
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
             
-            # 调用 AstrBot 内置的 HTML 渲染器
-            # options 设置 device_scale_factor=2 可以让文字更清晰
-            img_url = await self.html_render(LOG_TEMPLATE, render_data, options={"device_scale_factor": 2})
+            # 渲染配置升级:
+            # 1. device_scale_factor=3: 3倍超采样，彻底解决文字边缘模糊
+            # 2. viewport width=640: 强制视口宽度，让卡片占满画面，消除左右黑边
+            render_options = {
+                "device_scale_factor": 3, 
+                "viewport": {"width": 640, "height": 1000}, 
+                "full_page": True,
+            }
+            
+            img_url = await self.html_render(LOG_TEMPLATE, render_data, options=render_options)
             
             if img_url:
                 yield event.image_result(img_url)
             else:
-                # 渲染失败兜底回文本
-                yield event.plain_result(f"【渲染失败】\n{title} ({subtitle})\n\n{content}")
+                yield event.plain_result(f"【渲染失败】\n{title}\n{content}")
                 
         except Exception as e:
             logger.error(f"[IntelligentRetry] 图片渲染异常: {e}")
@@ -247,7 +277,7 @@ class IntelligentRetryWithCoT(Star):
             except Exception: return None
         return await asyncio.to_thread(_read_impl)
 
-    # ======================= 功能指令 (Updated) =======================
+    # ======================= 功能指令 =======================
 
     @event_filter.command("rosaos")
     async def get_rosaos_log(self, event: AstrMessageEvent, index: str = "1"):
@@ -265,7 +295,6 @@ class IntelligentRetryWithCoT(Star):
         if not log_content:
             yield event.plain_result(f"📭 在最近记录中未找到第 {idx} 条。")
         else:
-            # 使用图片渲染
             async for msg in self._render_and_reply(
                 event, 
                 title="罗莎内心记录", 
@@ -322,7 +351,6 @@ class IntelligentRetryWithCoT(Star):
             except (asyncio.TimeoutError, Exception): pass
 
         if success:
-            # 使用图片渲染分析报告
             async for msg in self._render_and_reply(
                 event,
                 title="COGITO 认知分析报告",
@@ -331,7 +359,7 @@ class IntelligentRetryWithCoT(Star):
             ):
                 yield msg
         else:
-            yield event.plain_result("⚠️ 分析服务不可用 (Timeout/Error)。")
+            yield event.plain_result("⚠️ 分析服务暂时不可用 (Timeout)。")
 
     # ======================= 核心重试逻辑 =======================
 
@@ -408,7 +436,7 @@ class IntelligentRetryWithCoT(Star):
                     await self._split_and_format_cot(temp, event)
                     comp.text = temp.completion_text
 
-    # --- Helper Methods (Shortened for brevity, same logic) ---
+    # --- Helper Methods ---
 
     def _is_cot_structure_incomplete(self, text: str) -> bool:
         if not text: return False
@@ -503,7 +531,6 @@ class IntelligentRetryWithCoT(Star):
             if new_response and getattr(new_response, "completion_text", ""):
                 if not self._should_retry_response(new_response) and not self._is_cot_structure_incomplete(new_response.completion_text):
                     await self._split_and_format_cot(new_response, event)
-                    res = Comp.Plain(new_response.completion_text) # Simplified result creation
                     from astrbot.api.event import MessageEventResult, ResultContentType
                     final_res = MessageEventResult()
                     final_res.message(new_response.completion_text)
