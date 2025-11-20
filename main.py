@@ -11,17 +11,18 @@ from datetime import datetime
 import astrbot.api.message_components as Comp
 from astrbot.api import logger, AstrBotConfig
 from astrbot.api.star import Context, Star, register
-from astrbot.api.event import AstrMessageEvent, filter
+# 【关键修复】将 filter 重命名为 event_filter，避免覆盖 Python 内置的 filter 函数
+from astrbot.api.event import AstrMessageEvent, filter as event_filter
 from astrbot.api.provider import LLMResponse
 
-# 独立的 Logger 标记，保持文件整洁
+# 独立的 Logger 标记
 LOG_DIR = "logs"
 
 @register(
-    "intelligent_retry_with_cot",
+    "Rosaintelligent_retry_with_cot",
     "ReedSein",
     "集成了思维链(CoT)处理的智能重试插件。专为罗莎人格打造，内置 Cogito 认知总结系统。",
-    "3.3.0-Rosa-Cogito",
+    "3.3.0-Rosa-Cogito-Fix",
 )
 class IntelligentRetryWithCoT(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -57,7 +58,7 @@ class IntelligentRetryWithCoT(Star):
         self.summary_prompt_template = config.get("summary_prompt_template", 
             "请阅读以下机器人的'内心独白(Inner Thought)'日志，用简练、客观的语言总结其核心思考逻辑、情绪状态以及最终的决策意图。\n\n日志内容：\n{log}")
 
-        logger.info(f"[IntelligentRetry] 罗莎 Cogito 版已加载。重试策略: {self.max_attempts}次, 总结小模型: {self.summary_provider_id or 'Auto'}")
+        logger.info(f"[IntelligentRetry] 罗莎 Cogito 修复版已加载。")
 
     def _parse_config(self, config: AstrBotConfig) -> None:
         """解析配置"""
@@ -74,7 +75,7 @@ class IntelligentRetryWithCoT(Star):
         self.fallback_reply = config.get("fallback_reply", "抱歉，服务波动，罗莎暂时无法回应。")
         
         self.enable_truncation_retry = config.get("enable_truncation_retry", False)
-        self.force_cot_structure = config.get("force_cot_structure", True) # 罗莎默认强制开启结构检查
+        self.force_cot_structure = config.get("force_cot_structure", True)
         
         # 并发配置
         self.enable_concurrent_retry = config.get("enable_concurrent_retry", False)
@@ -85,7 +86,7 @@ class IntelligentRetryWithCoT(Star):
 
     # ======================= Cogito 认知总结模块 =======================
 
-    @filter.command("rosaos")
+    @event_filter.command("rosaos")
     async def get_rosaos_log(self, event: AstrMessageEvent, index: str = "1"):
         """
         获取原始日志。
@@ -104,14 +105,12 @@ class IntelligentRetryWithCoT(Star):
         if not log_content:
             yield event.plain_result("📭 未找到对应的日志记录，今天可能还没说过话。")
         else:
-            # 使用 Markdown 代码块包裹，防止格式错乱
             yield event.plain_result(f"📔 **罗莎内心OS (Index {idx})**:\n\n{log_content}")
 
-    @filter.command("cogito")
+    @event_filter.command("cogito")
     async def handle_cogito(self, event: AstrMessageEvent, index: str = "1"):
         """
         调用小型LLM总结指定日志。
-        拥有独立的重试机制，且不被主重试逻辑拦截。
         """
         try:
             idx = int(index)
@@ -126,7 +125,7 @@ class IntelligentRetryWithCoT(Star):
             yield event.plain_result("📭 找不到该条日志，无法进行总结。")
             return
             
-        # 2. 确定 Provider (优先配置，兜底当前会话)
+        # 2. 确定 Provider
         target_provider_id = self.summary_provider_id
         if not target_provider_id:
             target_provider_id = await self.context.get_current_chat_provider_id(event.unified_msg_origin)
@@ -140,12 +139,9 @@ class IntelligentRetryWithCoT(Star):
         # 3. 构建 Prompt
         prompt = self.summary_prompt_template.replace("{log}", log_content)
         
-        # 4. 执行带简单重试的生成逻辑
+        # 4. 执行简单重试逻辑
         success = False
         final_summary = ""
-        
-        # +1 是因为 range 是左闭右开，这里只是简单的计数循环
-        # 如果 summary_max_retries 是 2，我们尝试 2 次
         retry_count = max(1, self.summary_max_retries)
         
         for attempt in range(retry_count):
@@ -158,13 +154,13 @@ class IntelligentRetryWithCoT(Star):
                 if resp and resp.completion_text:
                     final_summary = resp.completion_text
                     success = True
-                    break # 成功，跳出循环
+                    break
                 else:
                     logger.warning(f"[Cogito] 第 {attempt+1} 次总结尝试返回为空。")
             except Exception as e:
                 logger.warning(f"[Cogito] 第 {attempt+1} 次总结尝试异常: {e}")
                 if attempt < retry_count - 1:
-                    await asyncio.sleep(1) # 简单退避
+                    await asyncio.sleep(1)
 
         # 5. 输出结果
         if success:
@@ -174,7 +170,7 @@ class IntelligentRetryWithCoT(Star):
 
     # ======================= 核心拦截与处理模块 =======================
 
-    @filter.on_llm_request(priority=70)
+    @event_filter.on_llm_request(priority=70)
     async def store_llm_request(self, event: AstrMessageEvent, req):
         """
         捕获并存储请求。
@@ -184,10 +180,8 @@ class IntelligentRetryWithCoT(Star):
             return
             
         # 1. 防拦截检查
-        # 如果当前消息是 /cogito 等指令，直接返回，不存入 pending_requests
-        # 这意味着 process_and_retry_on_llm_response 将无法找到 key，从而直接放行
         msg_text = (event.message_str or "").strip().lower()
-        if msg_text.startswith(("cogito", "rosaos", "reset", "new")):
+        if msg_text.startswith(("/cogito", "/rosaos", "reset", "new")):
             logger.debug(f"[IntelligentRetry] 旁路放行内部指令: {msg_text[:10]}...")
             return
 
@@ -225,31 +219,43 @@ class IntelligentRetryWithCoT(Star):
     async def _read_thought_log(self, index: int) -> Optional[str]:
         """异步读取日志文件，支持倒序索引"""
         now = datetime.now()
+        # 确保 logs 目录使用绝对路径或相对运行根目录的路径
+        # AstrBot 运行根目录通常包含 data/ 和 logs/
         log_file = os.path.join(LOG_DIR, f"{now.strftime('%Y-%m-%d')}_thought.log")
-
+        
+        # 简单的路径检查，如果相对路径找不到，尝试绝对路径（兜底）
         if not os.path.exists(log_file):
-            return None
+            # 尝试拼接到当前工作目录
+            abs_path = os.path.abspath(log_file)
+            if not os.path.exists(abs_path):
+                # 再尝试一下用户提到的 /root/AstrBot/logs
+                fallback_path = os.path.join("/root/AstrBot", LOG_DIR, f"{now.strftime('%Y-%m-%d')}_thought.log")
+                if os.path.exists(fallback_path):
+                    log_file = fallback_path
+                else:
+                    logger.warning(f"[IntelligentRetry] 日志文件未找到: {log_file}")
+                    return None
 
         def _blocking_read():
             try:
                 with open(log_file, "r", encoding="utf-8") as f:
                     content = f.read()
-                # 按双换行符分割日志块，移除空块
-                entries = list(filter(None, content.split("\n\n")))
+                
+                # 【关键修复】使用列表推导式代替 filter(None, ...)，避免与模块名冲突
+                entries = [entry.strip() for entry in content.split("\n\n") if entry.strip()]
+                
                 if not entries: return None
                 
-                # 倒序映射: 1 -> -1, 2 -> -2
                 target_idx = -1 * index
                 if abs(target_idx) > len(entries): return None
                 
-                return entries[target_idx].strip()
+                return entries[target_idx]
             except Exception as e:
                 logger.error(f"[IntelligentRetry] 读取日志失败: {e}")
                 return None
 
         return await asyncio.to_thread(_blocking_read)
 
-    # ... (辅助函数保持不变) ...
     async def _periodic_cleanup_task(self):
         while True:
             try:
@@ -272,7 +278,6 @@ class IntelligentRetryWithCoT(Star):
         event._retry_plugin_request_key = key
         return key
 
-    # ... (判断逻辑保持不变) ...
     def _is_truncated(self, text_or_response) -> bool:
         if hasattr(text_or_response, "completion_text"):
             text = text_or_response.completion_text or ""
@@ -280,7 +285,6 @@ class IntelligentRetryWithCoT(Star):
         else:
             text = text_or_response
         if not text or len(text) < 5: return False
-        # 简化的兜底检测，实际可使用更复杂的正则
         return False
 
     def _should_retry_response(self, result) -> bool:
@@ -325,7 +329,6 @@ class IntelligentRetryWithCoT(Star):
             return None
 
     async def _execute_retry_sequence(self, event: AstrMessageEvent, request_key: str) -> bool:
-        # 主重试逻辑：顺序 + 并发 (此处为简化版，完整版逻辑请保留)
         delay = max(0, int(self.retry_delay))
         attempts = self.max_attempts
         for attempt in range(1, attempts + 1):
@@ -343,7 +346,6 @@ class IntelligentRetryWithCoT(Star):
         return False
 
     def _is_cot_structure_incomplete(self, text: str) -> bool:
-        """罗莎结构检查"""
         if not text: return False
         has_start = self.cot_start_tag in text
         has_end = self.cot_end_tag in text
@@ -355,7 +357,6 @@ class IntelligentRetryWithCoT(Star):
             return not is_complete
 
     async def _split_and_format_cot(self, response: LLMResponse):
-        """CoT 分割与日志记录"""
         if not response or not response.completion_text: return
         text = response.completion_text
         thought = ""
@@ -386,24 +387,18 @@ class IntelligentRetryWithCoT(Star):
             now = datetime.now()
             fpath = os.path.join(LOG_DIR, f"{now.strftime('%Y-%m-%d')}_thought.log")
             with open(fpath, "a", encoding="utf-8") as f:
-                # 双换行分隔
                 f.write(f"[{now.strftime('%H:%M:%S')}] {content}\n\n")
         await asyncio.to_thread(_write)
 
-    @filter.on_llm_response(priority=5)
+    @event_filter.on_llm_response(priority=5)
     async def process_and_retry_on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
-        """出口拦截器"""
         if self.max_attempts <= 0 or not hasattr(resp, "completion_text"): return
-        # 忽略工具调用
         if getattr(resp, "raw_completion", None):
             choices = getattr(resp.raw_completion, "choices", [])
             if choices and getattr(choices[0], "finish_reason", None) == "tool_calls": return
 
         request_key = self._get_request_key(event)
-        
-        # 【核心防拦截生效处】
-        # 由于 store_llm_request 跳过了 Cogito 请求的存储，这里 request_key 不存在
-        # 插件将直接返回，不对 Cogito 的输出进行重试检查或 CoT 格式要求
+        # 防拦截：如果 key 不在，说明是白名单指令，直接放行
         if request_key not in self.pending_requests: return
 
         text = resp.completion_text or ""
@@ -420,9 +415,8 @@ class IntelligentRetryWithCoT(Star):
         await self._split_and_format_cot(resp)
         self.pending_requests.pop(request_key, None)
 
-    @filter.on_decorating_result(priority=5)
+    @event_filter.on_decorating_result(priority=5)
     async def final_cot_stripper(self, event: AstrMessageEvent):
-        """最终清理兜底"""
         result = event.get_result()
         if not result or not result.chain: return
         plain_text = result.get_plain_text()
