@@ -23,6 +23,12 @@
     "hint": "小模型生成总结失败时的重试次数。建议设置为 1-2 次。",
     "default": 2
   },
+  "summary_timeout": {
+    "description": "总结任务超时秒数",
+    "type": "int",
+    "hint": "如果小模型在指定时间内未返回总结结果，将中止任务并重试或兜底。",
+    "default": 60
+  },
   "summary_prompt_template": {
     "description": "日志总结提示词",
     "type": "text",
