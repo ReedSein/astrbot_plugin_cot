@@ -137,8 +137,8 @@ def sanitize_filename(session_id: str) -> str:
 @register(
     "Rosaintelligent_retry_with_cot",
     "ReedSein",
-    "集成了思维链(CoT)处理的智能重试插件。v3.8.11 完整无阉割修复版。",
-    "3.8.11-Rosa-Full-Integrity",
+    "集成了思维链(CoT)处理的智能重试插件。v3.8.12 修复500错误被跳过的问题（Aggressive Retry）。",
+    "3.8.12-Rosa-AggressiveRetry",
 )
 class IntelligentRetryWithCoT(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -168,13 +168,14 @@ class IntelligentRetryWithCoT(Star):
         self.summary_timeout = int(config.get("summary_timeout", 60))
         self.summary_prompt_template = config.get("summary_prompt_template", "总结日志：\n{log}")
 
-        logger.info(f"[IntelligentRetry] 3.8.11 完整修复版已加载。")
+        logger.info(f"[IntelligentRetry] 3.8.12 强力重试版已加载。")
 
     def _parse_config(self, config: AstrBotConfig) -> None:
         self.max_attempts = config.get("max_attempts", 3)
         self.retry_delay = config.get("retry_delay", 2)
         
-        default_keywords = "api 返回的内容为空\n调用失败\n[TRUNCATED_BY_LENGTH]"
+        # [MODIFIED] 添加了针对 500 错误的关键词
+        default_keywords = "api 返回的内容为空\n调用失败\n[TRUNCATED_BY_LENGTH]\nupstream error\ndo_request_failed\ninternal server error\n500"
         keywords_str = config.get("error_keywords", default_keywords)
         self.error_keywords = [k.strip().lower() for k in keywords_str.split("\n") if k.strip()]
 
@@ -188,24 +189,21 @@ class IntelligentRetryWithCoT(Star):
     async def _render_and_reply(self, event: AstrMessageEvent, title: str, subtitle: str, content: str):
         try:
             render_data = {"title": title, "subtitle": subtitle, "content": content, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-            render_options = {"device_scale_factor": 3, "viewport": {"width": 640, "height": 1000}, "full_page": True}
-            img_url = await self.html_render(LOG_TEMPLATE, render_data, options=render_options)
+            img_url = await self.html_render(LOG_TEMPLATE, render_data, options={"viewport": {"width": 640, "height": 800}, "full_page": True})
             if img_url: yield event.image_result(img_url)
             else: yield event.plain_result(f"【渲染失败】\n{content}")
         except Exception: yield event.plain_result(f"【系统异常】\n{content}")
 
-    # ======================= 存储层 (完整逻辑) =======================
+    # ======================= 存储层 =======================
     async def _async_save_thought(self, session_id: str, content: str):
         if not session_id or not content: return
         def _write_impl():
             try:
-                # 1. 每日归档
                 date_str = datetime.now().strftime("%Y-%m-%d")
                 archive_path = COLD_ARCHIVE_DIR / f"{date_str}_thought.log"
                 with open(archive_path, 'a', encoding='utf-8') as f:
                     f.write(f"[{datetime.now().strftime('%H:%M:%S')}] [Session: {session_id}]\n{content}\n{'-'*40}\n")
                 
-                # 2. 热数据 JSON
                 safe_name = sanitize_filename(session_id)
                 json_path = HOT_STORAGE_DIR / f"{safe_name}.json"
                 thoughts = []
@@ -232,7 +230,7 @@ class IntelligentRetryWithCoT(Star):
             except Exception: return None
         return await asyncio.to_thread(_read_impl)
 
-    # ======================= 功能指令 (完整逻辑) =======================
+    # ======================= 功能指令 =======================
     @event_filter.command("rosaos")
     async def get_rosaos_log(self, event: AstrMessageEvent, index: str = "1"):
         """获取内心OS"""
@@ -305,7 +303,11 @@ class IntelligentRetryWithCoT(Star):
         if resp and hasattr(resp, "completion_text") and self.cot_start_tag in (resp.completion_text or ""):
             await self._split_and_format_cot(resp, event)
 
-        if self.max_attempts <= 0 or not hasattr(resp, "completion_text"): return
+        # [CRITICAL FIX] 移除了对 completion_text 存在的强制检查
+        # 即使 resp 破损，我们也希望进入下面的重试检查逻辑
+        # if self.max_attempts <= 0 or not hasattr(resp, "completion_text"): return
+        
+        # [MODIFIED] 更宽松的入口检查，只过滤显式的 Tool Calls
         if getattr(resp, "raw_completion", None):
             choices = getattr(resp.raw_completion, "choices", [])
             if choices and getattr(choices[0], "finish_reason", None) == "tool_calls": return
@@ -313,11 +315,19 @@ class IntelligentRetryWithCoT(Star):
         request_key = self._get_request_key(event)
         if request_key not in self.pending_requests: return
 
-        text = resp.completion_text or ""
-        # [Fix] 恢复 _is_truncated 调用
+        # [MODIFIED] 安全获取文本，如果 resp 破损则 text 为空串
+        text = getattr(resp, "completion_text", "") or ""
+        
         is_trunc = self.enable_truncation_retry and self._is_truncated(resp)
         
-        needs_retry = not text.strip() or self._should_retry_response(resp) or is_trunc or self._is_cot_structure_incomplete(text)
+        # [CRITICAL] 增加对 upstream error 的显式检测
+        is_error = False
+        raw = str(getattr(resp, "raw_completion", "")).lower()
+        if "upstream error" in raw or "do_request_failed" in raw or "500" in raw:
+            is_error = True
+            logger.warning(f"[IntelligentRetry] 检测到 Upstream 500 Error")
+
+        needs_retry = not text.strip() or self._should_retry_response(resp) or is_trunc or self._is_cot_structure_incomplete(text) or is_error
         
         if needs_retry:
             logger.info(f"[IntelligentRetry] 🔴 触发重试逻辑 (Key: {request_key})")
@@ -348,7 +358,7 @@ class IntelligentRetryWithCoT(Star):
         
         if has_tag:
             for comp in result.chain:
-                # [Fix] 替换 Comp.Text 为 Comp.Plain
+                # [Fix] Comp.Plain
                 if isinstance(comp, Comp.Plain) and comp.text:
                     temp = LLMResponse()
                     temp.completion_text = comp.text
@@ -357,7 +367,6 @@ class IntelligentRetryWithCoT(Star):
 
     # --- Helper Methods ---
 
-    # [Fix] 补回遗漏的 _is_truncated 方法
     def _is_truncated(self, text_or_response) -> bool:
         text = text_or_response.completion_text if hasattr(text_or_response, "completion_text") else text_or_response
         if hasattr(text_or_response, "completion_text") and "[TRUNCATED_BY_LENGTH]" in (text or ""): return True
@@ -412,11 +421,25 @@ class IntelligentRetryWithCoT(Star):
         return key
 
     def _should_retry_response(self, result) -> bool:
+        # [MODIFIED] Aggressive Logic
         if not result: return True
-        text = result.completion_text if hasattr(result, "completion_text") else result.get_plain_text()
+        
+        # 安全获取文本
+        text = getattr(result, "completion_text", "") or ""
+        # 尝试从 result chain 获取文本 (如果是 MessageEventResult)
+        if not text and hasattr(result, "get_plain_text"):
+             text = result.get_plain_text()
+             
         if not (text or "").strip(): return True
+        
         for kw in self.error_keywords:
             if kw in text.lower(): return True
+            
+        # 检查 raw completion 是否包含错误
+        raw = str(getattr(result, "raw_completion", "")).lower()
+        if "error" in raw and ("type" in raw or "code" in raw):
+            return True
+            
         return False
 
     async def _perform_retry_with_stored_params(self, request_key: str) -> Optional[Any]:
