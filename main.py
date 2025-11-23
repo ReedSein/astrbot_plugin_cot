@@ -137,8 +137,8 @@ def sanitize_filename(session_id: str) -> str:
 @register(
     "Rosaintelligent_retry_with_cot",
     "ReedSein",
-    "集成了思维链(CoT)处理的智能重试插件。v3.8.12 修复500错误被跳过的问题（Aggressive Retry）。",
-    "3.8.12-Rosa-AggressiveRetry",
+    "集成了思维链(CoT)处理的智能重试插件。v3.8.13 异常拦截版 (Interceptor)，专治500/429。",
+    "3.8.13-Rosa-Interceptor-Full",
 )
 class IntelligentRetryWithCoT(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -168,14 +168,14 @@ class IntelligentRetryWithCoT(Star):
         self.summary_timeout = int(config.get("summary_timeout", 60))
         self.summary_prompt_template = config.get("summary_prompt_template", "总结日志：\n{log}")
 
-        logger.info(f"[IntelligentRetry] 3.8.12 强力重试版已加载。")
+        logger.info(f"[IntelligentRetry] 3.8.13 异常拦截版已加载。")
 
     def _parse_config(self, config: AstrBotConfig) -> None:
         self.max_attempts = config.get("max_attempts", 3)
         self.retry_delay = config.get("retry_delay", 2)
         
-        # [MODIFIED] 添加了针对 500 错误的关键词
-        default_keywords = "api 返回的内容为空\n调用失败\n[TRUNCATED_BY_LENGTH]\nupstream error\ndo_request_failed\ninternal server error\n500"
+        # [Config] 扩充异常检测词库
+        default_keywords = "api 返回的内容为空\n调用失败\n[TRUNCATED_BY_LENGTH]\nupstream error\ndo_request_failed\ninternal server error\n500\n429\nrate limit"
         keywords_str = config.get("error_keywords", default_keywords)
         self.error_keywords = [k.strip().lower() for k in keywords_str.split("\n") if k.strip()]
 
@@ -303,11 +303,7 @@ class IntelligentRetryWithCoT(Star):
         if resp and hasattr(resp, "completion_text") and self.cot_start_tag in (resp.completion_text or ""):
             await self._split_and_format_cot(resp, event)
 
-        # [CRITICAL FIX] 移除了对 completion_text 存在的强制检查
-        # 即使 resp 破损，我们也希望进入下面的重试检查逻辑
-        # if self.max_attempts <= 0 or not hasattr(resp, "completion_text"): return
-        
-        # [MODIFIED] 更宽松的入口检查，只过滤显式的 Tool Calls
+        # 如果响应直接是空的或者带有错误标记，也视为需要重试
         if getattr(resp, "raw_completion", None):
             choices = getattr(resp.raw_completion, "choices", [])
             if choices and getattr(choices[0], "finish_reason", None) == "tool_calls": return
@@ -315,17 +311,12 @@ class IntelligentRetryWithCoT(Star):
         request_key = self._get_request_key(event)
         if request_key not in self.pending_requests: return
 
-        # [MODIFIED] 安全获取文本，如果 resp 破损则 text 为空串
         text = getattr(resp, "completion_text", "") or ""
-        
         is_trunc = self.enable_truncation_retry and self._is_truncated(resp)
         
-        # [CRITICAL] 增加对 upstream error 的显式检测
-        is_error = False
-        raw = str(getattr(resp, "raw_completion", "")).lower()
-        if "upstream error" in raw or "do_request_failed" in raw or "500" in raw:
-            is_error = True
-            logger.warning(f"[IntelligentRetry] 检测到 Upstream 500 Error")
+        # [Check] 检查原始响应是否包含报错
+        raw_str = str(getattr(resp, "raw_completion", "")).lower()
+        is_error = "error" in raw_str and ("upstream" in raw_str or "500" in raw_str)
 
         needs_retry = not text.strip() or self._should_retry_response(resp) or is_trunc or self._is_cot_structure_incomplete(text) or is_error
         
@@ -337,16 +328,45 @@ class IntelligentRetryWithCoT(Star):
                 resp.completion_text = res.get_plain_text() if res else ""
             else:
                 if self.fallback_reply:
-                    logger.warning(f"[IntelligentRetry] ❌ 重试全部失败，强制应用兜底回复")
-                    anti_spam_suffix = "\u200b" * (int(time.time()) % 3) 
-                    final_fallback = f"{self.fallback_reply}{anti_spam_suffix}"
-                    final_res = MessageEventResult()
-                    final_res.message(final_fallback)
-                    final_res.result_content_type = ResultContentType.LLM_RESULT
-                    event.set_result(final_res)
-                    resp.completion_text = final_fallback
+                    self._apply_fallback(event)
+                    # 尝试同步更新 resp 以防万一
+                    resp.completion_text = self.fallback_reply
         
         self.pending_requests.pop(request_key, None)
+
+    @event_filter.on_decorating_result(priority=20)
+    async def intercept_api_error(self, event: AstrMessageEvent):
+        """
+        [NEW] 异常拦截层 (Priority=20)
+        专门捕获 AstrBot Core 因 Provider 抛出异常 (500, 429) 而生成的报错消息。
+        这些异常会导致 on_llm_response 被跳过，必须在这里拦截。
+        """
+        request_key = self._get_request_key(event)
+        if request_key not in self.pending_requests: return
+
+        result = event.get_result()
+        if not result: return
+        
+        text = result.get_plain_text() or ""
+        # 检测是否是 Core 生成的报错信息 (特征匹配)
+        is_core_error = "AstrBot 请求失败" in text or "Error code:" in text or "InternalServerError" in text or "RateLimitError" in text
+        
+        if is_core_error:
+            logger.warning(f"[IntelligentRetry] 🛡️ 拦截到 Core 异常消息 (Key: {request_key})，启动紧急重试")
+            
+            # 启动重试
+            success = await self._execute_retry_sequence(event, request_key)
+            
+            if success:
+                # 重试成功，event 结果已被更新
+                logger.info(f"[IntelligentRetry] 🛡️ 异常拦截重试成功！")
+            else:
+                # 重试失败，强制应用兜底
+                if self.fallback_reply:
+                    self._apply_fallback(event)
+            
+            # 清理 Key
+            self.pending_requests.pop(request_key, None)
 
     @event_filter.on_decorating_result(priority=5)
     async def final_cot_stripper(self, event: AstrMessageEvent):
@@ -358,7 +378,6 @@ class IntelligentRetryWithCoT(Star):
         
         if has_tag:
             for comp in result.chain:
-                # [Fix] Comp.Plain
                 if isinstance(comp, Comp.Plain) and comp.text:
                     temp = LLMResponse()
                     temp.completion_text = comp.text
@@ -366,6 +385,17 @@ class IntelligentRetryWithCoT(Star):
                     comp.text = temp.completion_text
 
     # --- Helper Methods ---
+
+    def _apply_fallback(self, event: AstrMessageEvent):
+        """应用兜底回复"""
+        logger.warning(f"[IntelligentRetry] ❌ 重试耗尽，应用兜底回复")
+        anti_spam_suffix = "\u200b" * (int(time.time()) % 3) 
+        final_fallback = f"{self.fallback_reply}{anti_spam_suffix}"
+        
+        final_res = MessageEventResult()
+        final_res.message(final_fallback)
+        final_res.result_content_type = ResultContentType.LLM_RESULT
+        event.set_result(final_res)
 
     def _is_truncated(self, text_or_response) -> bool:
         text = text_or_response.completion_text if hasattr(text_or_response, "completion_text") else text_or_response
@@ -412,7 +442,6 @@ class IntelligentRetryWithCoT(Star):
         return {int(line.strip()) for line in codes_str.split("\n") if line.strip().isdigit()}
 
     def _get_request_key(self, event: AstrMessageEvent) -> str:
-        """UUID Key生成"""
         if hasattr(event, "_retry_plugin_request_key"): 
             return event._retry_plugin_request_key
         trace_id = uuid.uuid4().hex[:8]
@@ -421,25 +450,12 @@ class IntelligentRetryWithCoT(Star):
         return key
 
     def _should_retry_response(self, result) -> bool:
-        # [MODIFIED] Aggressive Logic
         if not result: return True
-        
-        # 安全获取文本
         text = getattr(result, "completion_text", "") or ""
-        # 尝试从 result chain 获取文本 (如果是 MessageEventResult)
-        if not text and hasattr(result, "get_plain_text"):
-             text = result.get_plain_text()
-             
+        if not text and hasattr(result, "get_plain_text"): text = result.get_plain_text()
         if not (text or "").strip(): return True
-        
         for kw in self.error_keywords:
             if kw in text.lower(): return True
-            
-        # 检查 raw completion 是否包含错误
-        raw = str(getattr(result, "raw_completion", "")).lower()
-        if "error" in raw and ("type" in raw or "code" in raw):
-            return True
-            
         return False
 
     async def _perform_retry_with_stored_params(self, request_key: str) -> Optional[Any]:
