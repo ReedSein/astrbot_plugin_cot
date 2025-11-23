@@ -136,8 +136,8 @@ def sanitize_filename(session_id: str) -> str:
 @register(
     "Rosaintelligent_retry_with_cot",
     "ReedSein",
-    "集成了思维链(CoT)处理的智能重试插件。修复Key匹配、静默重试日志及完整功能。",
-    "3.8.6-Rosa-Ultimate",
+    "集成了思维链(CoT)处理的智能重试插件。包含完整存储、指令、修复后的重试逻辑。",
+    "3.8.8-Rosa-Ultimate-Fix",
 )
 class IntelligentRetryWithCoT(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -172,7 +172,7 @@ class IntelligentRetryWithCoT(Star):
         self.summary_prompt_template = config.get("summary_prompt_template", 
             "请阅读以下机器人的'内心独白(Inner Thought)'日志，用简练、客观的语言总结其核心思考逻辑、情绪状态以及最终的决策意图。\n\n日志内容：\n{log}")
 
-        logger.info(f"[IntelligentRetry] 3.8.6 终极完整版已加载。")
+        logger.info(f"[IntelligentRetry] 3.8.8 终极完整修复版已加载。")
 
     def _parse_config(self, config: AstrBotConfig) -> None:
         self.max_attempts = config.get("max_attempts", 3)
@@ -233,7 +233,7 @@ class IntelligentRetryWithCoT(Star):
             timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
             date_str = now.strftime("%Y-%m-%d")
             
-            # 1. 每日归档 (恢复)
+            # 1. 每日归档 (恢复逻辑)
             try:
                 archive_filename = f"{date_str}_thought.log"
                 archive_path = COLD_ARCHIVE_DIR / archive_filename
@@ -241,7 +241,7 @@ class IntelligentRetryWithCoT(Star):
                     f.write(f"[{timestamp}] [Session: {session_id}]\n{content}\n{'-'*40}\n")
             except Exception: pass
 
-            # 2. 热数据 (恢复)
+            # 2. 热数据 (恢复逻辑)
             try:
                 safe_name = sanitize_filename(session_id)
                 json_path = HOT_STORAGE_DIR / f"{safe_name}.json"
@@ -358,7 +358,7 @@ class IntelligentRetryWithCoT(Star):
         else:
             yield event.plain_result("⚠️ 分析服务暂时不可用 (Timeout)。")
 
-    # ======================= 核心重试逻辑 (含修复) =======================
+    # ======================= 核心重试逻辑 (含Fix) =======================
 
     @event_filter.on_llm_request(priority=70)
     async def store_llm_request(self, event: AstrMessageEvent, req):
@@ -367,6 +367,7 @@ class IntelligentRetryWithCoT(Star):
         msg_text = (event.message_str or "").strip().lower()
         if msg_text.startswith(("/cogito", "/rosaos", "reset", "new")): return
 
+        # [FIX] 获取稳定的 Request Key
         request_key = self._get_request_key(event)
         image_urls = [c.url for c in event.message_obj.message if isinstance(c, Comp.Image) and c.url]
 
@@ -396,7 +397,7 @@ class IntelligentRetryWithCoT(Star):
 
     @event_filter.on_llm_response(priority=5)
     async def process_and_retry_on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
-        # 1. 优先执行 CoT 裁剪 (Robust Fix: 即使 Key 丢失也要裁剪)
+        # 1. 优先执行 CoT 裁剪
         if resp and hasattr(resp, "completion_text") and self.cot_start_tag in (resp.completion_text or ""):
             await self._split_and_format_cot(resp, event)
 
@@ -405,7 +406,7 @@ class IntelligentRetryWithCoT(Star):
             choices = getattr(resp.raw_completion, "choices", [])
             if choices and getattr(choices[0], "finish_reason", None) == "tool_calls": return
 
-        # === 修复：确保 Key 匹配 ===
+        # [FIX] 使用相同的逻辑获取 Key
         request_key = self._get_request_key(event)
         if request_key not in self.pending_requests: return
 
@@ -413,9 +414,7 @@ class IntelligentRetryWithCoT(Star):
         is_trunc = self.enable_truncation_retry and self._is_truncated(resp)
         
         # 检查是否需要重试
-        needs_retry = not text.strip() or self._should_retry_response(resp) or is_trunc or self._is_cot_structure_incomplete(text)
-
-        if needs_retry:
+        if not text.strip() or self._should_retry_response(resp) or is_trunc or self._is_cot_structure_incomplete(text):
             logger.info(f"[IntelligentRetry] 🔴 触发重试逻辑 (Key: {request_key})")
             
             # 执行重试
@@ -425,11 +424,11 @@ class IntelligentRetryWithCoT(Star):
                 res = event.get_result()
                 resp.completion_text = res.get_plain_text() if res else ""
             else:
-                # === 修复：重试彻底失败，强制应用兜底回复 ===
+                # === [FIX] 兜底逻辑加强版 ===
                 if self.fallback_reply:
                     logger.warning(f"[IntelligentRetry] ❌ 重试全部失败，强制应用兜底回复")
                     
-                    # 添加随机噪音防复读
+                    # 防复读后缀
                     anti_spam_suffix = "\u200b" * (int(time.time()) % 3) 
                     final_fallback = f"{self.fallback_reply}{anti_spam_suffix}"
                     
@@ -454,7 +453,8 @@ class IntelligentRetryWithCoT(Star):
         if has_tag:
             logger.debug("[IntelligentRetry] 装饰阶段发现残留 CoT，执行强制清理")
             for comp in result.chain:
-                if isinstance(comp, Comp.Text) and comp.text:
+                # [FIX] 修复 API 兼容性问题：Comp.Text -> Comp.Plain
+                if isinstance(comp, Comp.Plain) and comp.text:
                     temp = LLMResponse()
                     temp.completion_text = comp.text
                     await self._split_and_format_cot(temp, event)
@@ -509,12 +509,9 @@ class IntelligentRetryWithCoT(Star):
         return {int(line.strip()) for line in codes_str.split("\n") if line.strip().isdigit()}
 
     def _get_request_key(self, event: AstrMessageEvent) -> str:
-        """
-        [Fix v3.8.5] 生成稳定的 Request Key，移除不稳定的 time.time() 依赖
-        """
+        """[FIX] 生成稳定的 Request Key，移除不稳定的 time.time()"""
         if hasattr(event, "_retry_plugin_request_key"): return event._retry_plugin_request_key
         
-        # 优先使用消息ID，其次使用 Origin
         msg_id = getattr(event.message_obj, "message_id", "")
         if msg_id:
             key = f"{event.unified_msg_origin}_{msg_id}"
@@ -562,7 +559,6 @@ class IntelligentRetryWithCoT(Star):
         session_id = event.unified_msg_origin
         
         for attempt in range(1, self.max_attempts + 1):
-            # === 后台静默日志 ===
             logger.warning(f"[IntelligentRetry] 🔄 (Session: {session_id}) 检测到异常，正在重试 {attempt}/{self.max_attempts}...")
             
             new_response = await self._perform_retry_with_stored_params(request_key)
