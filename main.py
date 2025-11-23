@@ -16,14 +16,14 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api.event import AstrMessageEvent, filter as event_filter, MessageEventResult, ResultContentType
 from astrbot.api.provider import LLMResponse
 
-# --- 存储架构配置 ---
+# --- 存储架构配置 (保留你的混合存储) ---
 HOT_STORAGE_DIR = Path("data/cot_os_logs/sessions")
 COLD_ARCHIVE_DIR = Path("data/cot_os_logs/daily_archive")
 
 HOT_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 COLD_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 
-# --- HTML 渲染模板 (IMAX HD Version) ---
+# --- HTML 渲染模板 (保留你的 IMAX HD Version) ---
 LOG_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -136,8 +136,8 @@ def sanitize_filename(session_id: str) -> str:
 @register(
     "Rosaintelligent_retry_with_cot",
     "ReedSein",
-    "集成了思维链(CoT)处理的智能重试插件。包含完整存储、指令、修复后的重试逻辑。",
-    "3.8.8-Rosa-Ultimate-Fix",
+    "集成了思维链(CoT)处理的智能重试插件。包含错误拦截器(Interceptor)，可捕获并重试因网络错误导致的异常。",
+    "3.9.0-Rosa-Ultimate-Interceptor",
 )
 class IntelligentRetryWithCoT(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -172,13 +172,14 @@ class IntelligentRetryWithCoT(Star):
         self.summary_prompt_template = config.get("summary_prompt_template", 
             "请阅读以下机器人的'内心独白(Inner Thought)'日志，用简练、客观的语言总结其核心思考逻辑、情绪状态以及最终的决策意图。\n\n日志内容：\n{log}")
 
-        logger.info(f"[IntelligentRetry] 3.8.8 终极完整修复版已加载。")
+        logger.info(f"[IntelligentRetry] 3.9.0 错误拦截器版 (Based on 3.8.8) 已加载。")
 
     def _parse_config(self, config: AstrBotConfig) -> None:
         self.max_attempts = config.get("max_attempts", 3)
         self.retry_delay = config.get("retry_delay", 2)
         
-        default_keywords = "api 返回的内容为空\n调用失败\n[TRUNCATED_BY_LENGTH]"
+        # [增强] 确保默认关键词包含 "调用失败"，这是 SpectreCore 抛出异常时的关键词
+        default_keywords = "api 返回的内容为空\n调用失败\nrequest failed\n[TRUNCATED_BY_LENGTH]"
         keywords_str = config.get("error_keywords", default_keywords)
         self.error_keywords = [k.strip().lower() for k in keywords_str.split("\n") if k.strip()]
 
@@ -223,7 +224,7 @@ class IntelligentRetryWithCoT(Star):
             logger.error(f"[IntelligentRetry] 图片渲染异常: {e}")
             yield event.plain_result(f"【系统异常】\n{content}")
 
-    # ======================= 存储层 (Hybrid - 完整恢复) =======================
+    # ======================= 存储层 (Hybrid - 完整保留) =======================
 
     async def _async_save_thought(self, session_id: str, content: str):
         if not session_id or not content: return
@@ -233,7 +234,7 @@ class IntelligentRetryWithCoT(Star):
             timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
             date_str = now.strftime("%Y-%m-%d")
             
-            # 1. 每日归档 (恢复逻辑)
+            # 1. 每日归档
             try:
                 archive_filename = f"{date_str}_thought.log"
                 archive_path = COLD_ARCHIVE_DIR / archive_filename
@@ -241,7 +242,7 @@ class IntelligentRetryWithCoT(Star):
                     f.write(f"[{timestamp}] [Session: {session_id}]\n{content}\n{'-'*40}\n")
             except Exception: pass
 
-            # 2. 热数据 (恢复逻辑)
+            # 2. 热数据
             try:
                 safe_name = sanitize_filename(session_id)
                 json_path = HOT_STORAGE_DIR / f"{safe_name}.json"
@@ -274,7 +275,7 @@ class IntelligentRetryWithCoT(Star):
             except Exception: return None
         return await asyncio.to_thread(_read_impl)
 
-    # ======================= 功能指令 (完整恢复) =======================
+    # ======================= 功能指令 (完整保留) =======================
 
     @event_filter.command("rosaos")
     async def get_rosaos_log(self, event: AstrMessageEvent, index: str = "1"):
@@ -358,7 +359,7 @@ class IntelligentRetryWithCoT(Star):
         else:
             yield event.plain_result("⚠️ 分析服务暂时不可用 (Timeout)。")
 
-    # ======================= 核心重试逻辑 (含Fix) =======================
+    # ======================= 核心重试逻辑 =======================
 
     @event_filter.on_llm_request(priority=70)
     async def store_llm_request(self, event: AstrMessageEvent, req):
@@ -367,7 +368,7 @@ class IntelligentRetryWithCoT(Star):
         msg_text = (event.message_str or "").strip().lower()
         if msg_text.startswith(("/cogito", "/rosaos", "reset", "new")): return
 
-        # [FIX] 获取稳定的 Request Key
+        # [Fix] 获取稳定的 Request Key
         request_key = self._get_request_key(event)
         image_urls = [c.url for c in event.message_obj.message if isinstance(c, Comp.Image) and c.url]
 
@@ -397,7 +398,7 @@ class IntelligentRetryWithCoT(Star):
 
     @event_filter.on_llm_response(priority=5)
     async def process_and_retry_on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
-        # 1. 优先执行 CoT 裁剪
+        # 1. 优先执行 CoT 裁剪 (Robust Fix: 即使 Key 丢失也要裁剪)
         if resp and hasattr(resp, "completion_text") and self.cot_start_tag in (resp.completion_text or ""):
             await self._split_and_format_cot(resp, event)
 
@@ -406,7 +407,6 @@ class IntelligentRetryWithCoT(Star):
             choices = getattr(resp.raw_completion, "choices", [])
             if choices and getattr(choices[0], "finish_reason", None) == "tool_calls": return
 
-        # [FIX] 使用相同的逻辑获取 Key
         request_key = self._get_request_key(event)
         if request_key not in self.pending_requests: return
 
@@ -415,40 +415,67 @@ class IntelligentRetryWithCoT(Star):
         
         # 检查是否需要重试
         if not text.strip() or self._should_retry_response(resp) or is_trunc or self._is_cot_structure_incomplete(text):
-            logger.info(f"[IntelligentRetry] 🔴 触发重试逻辑 (Key: {request_key})")
-            
-            # 执行重试
+            logger.info(f"[IntelligentRetry] 🔴 Response层触发重试 (Key: {request_key})")
             success = await self._execute_retry_sequence(event, request_key)
-            
             if success:
                 res = event.get_result()
                 resp.completion_text = res.get_plain_text() if res else ""
             else:
-                # === [FIX] 兜底逻辑加强版 ===
-                if self.fallback_reply:
-                    logger.warning(f"[IntelligentRetry] ❌ 重试全部失败，强制应用兜底回复")
-                    
-                    # 防复读后缀
-                    anti_spam_suffix = "\u200b" * (int(time.time()) % 3) 
-                    final_fallback = f"{self.fallback_reply}{anti_spam_suffix}"
-                    
-                    final_res = MessageEventResult()
-                    final_res.message(final_fallback)
-                    final_res.result_content_type = ResultContentType.LLM_RESULT
-                    
-                    event.set_result(final_res)
-                    resp.completion_text = final_fallback
+                self._apply_fallback(event, resp)
         
         self.pending_requests.pop(request_key, None)
 
-    @event_filter.on_decorating_result(priority=5)
+    # ======================= [NEW] 错误拦截器 =======================
+    @event_filter.on_decorating_result(priority=20)
+    async def error_interceptor(self, event: AstrMessageEvent):
+        """
+        拦截因为异常导致直接输出的 '调用失败' 消息，并强制重试
+        """
+        result = event.get_result()
+        if not result or not result.chain: return
+
+        plain_text = result.get_plain_text().strip()
+        if not plain_text: return
+
+        # 检查是否包含错误关键词
+        is_error = False
+        for kw in self.error_keywords:
+            if kw in plain_text.lower():
+                is_error = True
+                break
+        
+        if not is_error:
+            # 顺便检查一下是否有残留 CoT 需要清理 (双重保险)
+            await self.final_cot_stripper(event)
+            return
+
+        # 命中错误关键词，准备拦截
+        request_key = self._get_request_key(event)
+        if request_key in self.pending_requests:
+            logger.warning(f"[IntelligentRetry] 🛡️ 拦截到错误消息: '{plain_text[:20]}...' -> 立即接管并重试")
+            
+            # 清空原本的错误消息，避免发出去
+            event.get_result().chain.clear()
+            
+            # 执行重试
+            success = await self._execute_retry_sequence(event, request_key)
+            
+            if not success:
+                # 如果重试全失败了，再填入兜底消息
+                self._apply_fallback_to_result(event)
+            
+            # 无论成功失败，都消费掉这个 Key
+            self.pending_requests.pop(request_key, None)
+        else:
+            logger.debug(f"[IntelligentRetry] 拦截到错误但无 Request 上下文，放行: {plain_text[:20]}...")
+
     async def final_cot_stripper(self, event: AstrMessageEvent):
-        """最后一道防线"""
+        """装饰阶段再次检查文本链中是否残留了 CoT"""
         result = event.get_result()
         if not result or not result.chain: return
         
         plain_text = result.get_plain_text()
-        has_tag = self.cot_start_tag in plain_text or self.FINAL_REPLY_PATTERN.search(plain_text)
+        has_tag = self.cot_start_tag in plain_text
         
         if has_tag:
             logger.debug("[IntelligentRetry] 装饰阶段发现残留 CoT，执行强制清理")
@@ -554,12 +581,11 @@ class IntelligentRetryWithCoT(Star):
             return None
 
     async def _execute_retry_sequence(self, event: AstrMessageEvent, request_key: str) -> bool:
-        """执行重试循环，只在后台日志显示进度"""
         delay = max(0, int(self.retry_delay))
         session_id = event.unified_msg_origin
         
         for attempt in range(1, self.max_attempts + 1):
-            logger.warning(f"[IntelligentRetry] 🔄 (Session: {session_id}) 检测到异常，正在重试 {attempt}/{self.max_attempts}...")
+            logger.warning(f"[IntelligentRetry] 🔄 (Session: {session_id}) 正在重试 {attempt}/{self.max_attempts}...")
             
             new_response = await self._perform_retry_with_stored_params(request_key)
             if new_response and getattr(new_response, "completion_text", ""):
@@ -575,6 +601,23 @@ class IntelligentRetryWithCoT(Star):
                     return True
             if attempt < self.max_attempts: await asyncio.sleep(delay)
         return False
+
+    def _apply_fallback(self, event: AstrMessageEvent, resp: LLMResponse):
+        suffix = "\u200b" * (int(time.time()) % 3)
+        final = f"{self.fallback_reply}{suffix}"
+        
+        final_res = MessageEventResult()
+        final_res.message(final)
+        final_res.result_content_type = ResultContentType.LLM_RESULT
+        event.set_result(final_res)
+        resp.completion_text = final
+
+    def _apply_fallback_to_result(self, event: AstrMessageEvent):
+        suffix = "\u200b" * (int(time.time()) % 3)
+        final = f"{self.fallback_reply}{suffix}"
+        res = MessageEventResult()
+        res.message(final)
+        event.set_result(res)
 
     async def terminate(self):
         self._cleanup_task.cancel()
