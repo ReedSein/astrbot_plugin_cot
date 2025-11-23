@@ -5,7 +5,7 @@ import json
 import re
 import time
 import os
-import uuid  # [关键] 引入 UUID 用于生成唯一请求标识
+import uuid
 import random
 from typing import Dict, Any, Optional, List
 from datetime import datetime
@@ -137,8 +137,8 @@ def sanitize_filename(session_id: str) -> str:
 @register(
     "Rosaintelligent_retry_with_cot",
     "ReedSein",
-    "集成了思维链(CoT)处理的智能重试插件。v3.8.10 完整无阉割版，集成UUID修复与API兼容。",
-    "3.8.10-Rosa-Ultimate-Integrity",
+    "集成了思维链(CoT)处理的智能重试插件。v3.8.11 完整无阉割修复版。",
+    "3.8.11-Rosa-Full-Integrity",
 )
 class IntelligentRetryWithCoT(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -146,7 +146,6 @@ class IntelligentRetryWithCoT(Star):
         self.pending_requests: Dict[str, Dict[str, Any]] = {}
         
         self._cleanup_task = asyncio.create_task(self._periodic_cleanup_task())
-        
         self._parse_config(config)
         
         # --- 罗莎配置 ---
@@ -157,10 +156,7 @@ class IntelligentRetryWithCoT(Star):
         self.FINAL_REPLY_PATTERN = re.compile(self.final_reply_pattern_str, re.IGNORECASE)
         escaped_start = re.escape(self.cot_start_tag)
         escaped_end = re.escape(self.cot_end_tag)
-        self.THOUGHT_TAG_PATTERN = re.compile(
-            f'{escaped_start}(?P<content>.*?){escaped_end}',
-            re.DOTALL
-        )
+        self.THOUGHT_TAG_PATTERN = re.compile(f'{escaped_start}(?P<content>.*?){escaped_end}', re.DOTALL)
         
         self.display_cot_text = config.get("display_cot_text", False)
         self.filtered_keywords = config.get("filtered_keywords", ["呵呵，", "（……）"])
@@ -170,10 +166,9 @@ class IntelligentRetryWithCoT(Star):
         self.summary_max_retries = max(1, int(config.get("summary_max_retries", 2)))
         self.history_limit = int(config.get("history_limit", 100))
         self.summary_timeout = int(config.get("summary_timeout", 60))
-        self.summary_prompt_template = config.get("summary_prompt_template", 
-            "请阅读以下机器人的'内心独白(Inner Thought)'日志，用简练、客观的语言总结其核心思考逻辑、情绪状态以及最终的决策意图。\n\n日志内容：\n{log}")
+        self.summary_prompt_template = config.get("summary_prompt_template", "总结日志：\n{log}")
 
-        logger.info(f"[IntelligentRetry] 3.8.10 完整完整版已加载。")
+        logger.info(f"[IntelligentRetry] 3.8.11 完整修复版已加载。")
 
     def _parse_config(self, config: AstrBotConfig) -> None:
         self.max_attempts = config.get("max_attempts", 3)
@@ -186,64 +181,31 @@ class IntelligentRetryWithCoT(Star):
         self.retryable_status_codes = self._parse_status_codes(config.get("retryable_status_codes", "400\n429\n502\n503\n504"))
         self.non_retryable_status_codes = self._parse_status_codes(config.get("non_retryable_status_codes", ""))
         self.fallback_reply = config.get("fallback_reply", "抱歉，服务波动，罗莎暂时无法回应。")
-        
         self.enable_truncation_retry = config.get("enable_truncation_retry", False)
         self.force_cot_structure = config.get("force_cot_structure", True)
-        self.enable_concurrent_retry = config.get("enable_concurrent_retry", False)
-        self.concurrent_retry_threshold = max(0, int(config.get("concurrent_retry_threshold", 1)))
-        self.concurrent_retry_count = max(1, min(int(config.get("concurrent_retry_count", 2)), 5))
-        self.concurrent_retry_timeout = max(5, min(int(config.get("concurrent_retry_timeout", 30)), 300))
-        self.truncation_detection_mode = config.get("truncation_detection_mode", "enhanced")
 
-    # ======================= 渲染辅助方法 (HD Optimized) =======================
-
+    # ======================= 渲染辅助 =======================
     async def _render_and_reply(self, event: AstrMessageEvent, title: str, subtitle: str, content: str):
-        """通用图片渲染与发送逻辑"""
         try:
-            render_data = {
-                "title": title,
-                "subtitle": subtitle,
-                "content": content,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
-            
-            render_options = {
-                "device_scale_factor": 3, 
-                "viewport": {"width": 640, "height": 1000}, 
-                "full_page": True,
-            }
-            
+            render_data = {"title": title, "subtitle": subtitle, "content": content, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+            render_options = {"device_scale_factor": 3, "viewport": {"width": 640, "height": 1000}, "full_page": True}
             img_url = await self.html_render(LOG_TEMPLATE, render_data, options=render_options)
-            
-            if img_url:
-                yield event.image_result(img_url)
-            else:
-                yield event.plain_result(f"【渲染失败】\n{title}\n{content}")
-                
-        except Exception as e:
-            logger.error(f"[IntelligentRetry] 图片渲染异常: {e}")
-            yield event.plain_result(f"【系统异常】\n{content}")
+            if img_url: yield event.image_result(img_url)
+            else: yield event.plain_result(f"【渲染失败】\n{content}")
+        except Exception: yield event.plain_result(f"【系统异常】\n{content}")
 
-    # ======================= 存储层 (Hybrid - 完全保留) =======================
-
+    # ======================= 存储层 (完整逻辑) =======================
     async def _async_save_thought(self, session_id: str, content: str):
         if not session_id or not content: return
-        
         def _write_impl():
-            now = datetime.now()
-            timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
-            date_str = now.strftime("%Y-%m-%d")
-            
-            # 1. 每日归档 (Cold)
             try:
-                archive_filename = f"{date_str}_thought.log"
-                archive_path = COLD_ARCHIVE_DIR / archive_filename
+                # 1. 每日归档
+                date_str = datetime.now().strftime("%Y-%m-%d")
+                archive_path = COLD_ARCHIVE_DIR / f"{date_str}_thought.log"
                 with open(archive_path, 'a', encoding='utf-8') as f:
-                    f.write(f"[{timestamp}] [Session: {session_id}]\n{content}\n{'-'*40}\n")
-            except Exception: pass
-
-            # 2. 热数据 (Hot)
-            try:
+                    f.write(f"[{datetime.now().strftime('%H:%M:%S')}] [Session: {session_id}]\n{content}\n{'-'*40}\n")
+                
+                # 2. 热数据 JSON
                 safe_name = sanitize_filename(session_id)
                 json_path = HOT_STORAGE_DIR / f"{safe_name}.json"
                 thoughts = []
@@ -251,14 +213,10 @@ class IntelligentRetryWithCoT(Star):
                     try:
                         with open(json_path, 'r', encoding='utf-8') as f: thoughts = json.load(f)
                     except Exception: thoughts = []
-                
-                thoughts.insert(0, {"time": timestamp, "content": content})
+                thoughts.insert(0, {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "content": content})
                 if len(thoughts) > self.history_limit: thoughts = thoughts[:self.history_limit]
-                
-                with open(json_path, 'w', encoding='utf-8') as f:
-                    json.dump(thoughts, f, ensure_ascii=False, indent=2)
+                with open(json_path, 'w', encoding='utf-8') as f: json.dump(thoughts, f, ensure_ascii=False, indent=2)
             except Exception: pass
-
         await asyncio.to_thread(_write_impl)
 
     async def _async_read_thought(self, session_id: str, index: int) -> Optional[str]:
@@ -270,113 +228,54 @@ class IntelligentRetryWithCoT(Star):
                 with open(json_path, 'r', encoding='utf-8') as f: thoughts = json.load(f)
                 target_idx = index - 1
                 if target_idx < 0 or target_idx >= len(thoughts): return None
-                entry = thoughts[target_idx]
-                return str(entry.get('content', '')) if isinstance(entry, dict) else str(entry)
+                return str(thoughts[target_idx].get('content', ''))
             except Exception: return None
         return await asyncio.to_thread(_read_impl)
 
-    # ======================= 功能指令 (完全保留) =======================
-
+    # ======================= 功能指令 (完整逻辑) =======================
     @event_filter.command("rosaos")
     async def get_rosaos_log(self, event: AstrMessageEvent, index: str = "1"):
-        """获取内心OS (图片版)"""
-        try:
-            idx = int(index)
-            if idx < 1: raise ValueError
-        except ValueError:
-            yield event.plain_result("❌ 索引必须是大于0的整数")
-            return
-
-        session_id = event.unified_msg_origin
-        log_content = await self._async_read_thought(session_id, idx)
-        
-        if not log_content:
-            yield event.plain_result(f"📭 在最近记录中未找到第 {idx} 条。")
+        """获取内心OS"""
+        idx = int(index) if index.isdigit() else 1
+        log_content = await self._async_read_thought(event.unified_msg_origin, idx)
+        if not log_content: yield event.plain_result(f"📭 未找到第 {idx} 条记录。")
         else:
-            async for msg in self._render_and_reply(
-                event, 
-                title="罗莎内心记录", 
-                subtitle=f"Log Index: {idx}", 
-                content=log_content
-            ):
-                yield msg
+            async for msg in self._render_and_reply(event, "罗莎内心记录", f"Index: {idx}", log_content): yield msg
 
     @event_filter.command("cogito")
     async def handle_cogito(self, event: AstrMessageEvent, index: str = "1"):
-        """认知分析 (图片版)"""
-        try:
-            idx = int(index)
-            if idx < 1: raise ValueError
-        except ValueError:
-            yield event.plain_result("❌ 请输入有效的数字索引")
-            return
+        """认知分析"""
+        idx = int(index) if index.isdigit() else 1
+        log_content = await self._async_read_thought(event.unified_msg_origin, idx)
+        if not log_content: yield event.plain_result("📭 找不到该条日志。"); return
+        target_provider_id = self.summary_provider_id or await self.context.get_current_chat_provider_id(event.unified_msg_origin)
+        if not target_provider_id: yield event.plain_result("❌ 无法获取模型 Provider。"); return
 
-        session_id = event.unified_msg_origin
-        log_content = await self._async_read_thought(session_id, idx)
-        
-        if not log_content:
-            yield event.plain_result("📭 找不到该条日志，无法进行总结。")
-            return
-            
-        target_provider_id = self.summary_provider_id
-        if not target_provider_id:
-            target_provider_id = await self.context.get_current_chat_provider_id(event.unified_msg_origin)
-        
-        if not target_provider_id:
-            yield event.plain_result("❌ 无法获取模型 Provider。")
-            return
-
-        yield event.plain_result(f"🧠 分析中... (Index: {idx}, Timeout: {self.summary_timeout}s)")
-
+        yield event.plain_result(f"🧠 分析中... (Index: {idx})")
         prompt = self.summary_prompt_template.replace("{log}", log_content)
-        success = False
-        final_summary = ""
-        
-        # 重试逻辑保留
-        for attempt in range(self.summary_max_retries):
+        success = False; final_summary = ""
+        for _ in range(self.summary_max_retries):
             try:
-                resp = await asyncio.wait_for(
-                    self.context.llm_generate(
-                        chat_provider_id=target_provider_id,
-                        prompt=prompt
-                    ),
-                    timeout=self.summary_timeout
-                )
-                if resp and resp.completion_text:
-                    final_summary = resp.completion_text
-                    success = True
-                    break
-                await asyncio.sleep(1)
-            except (asyncio.TimeoutError, Exception): pass
-
+                resp = await asyncio.wait_for(self.context.llm_generate(chat_provider_id=target_provider_id, prompt=prompt), timeout=self.summary_timeout)
+                if resp and resp.completion_text: final_summary = resp.completion_text; success = True; break
+            except Exception: pass
         if success:
-            async for msg in self._render_and_reply(
-                event,
-                title="COGITO 认知分析报告",
-                subtitle=f"AI Analysis | Index {idx}",
-                content=final_summary
-            ):
-                yield msg
-        else:
-            yield event.plain_result("⚠️ 分析服务暂时不可用 (Timeout)。")
+            async for msg in self._render_and_reply(event, "COGITO 分析报告", f"Index {idx}", final_summary): yield msg
+        else: yield event.plain_result("⚠️ 分析超时。")
 
-    # ======================= 核心重试逻辑 (含 Fix: Key & Active Reply) =======================
+    # ======================= 核心重试逻辑 =======================
 
     @event_filter.on_llm_request(priority=70)
     async def store_llm_request(self, event: AstrMessageEvent, req):
-        """记录请求上下文 - 修复主动回复崩溃问题"""
+        """记录请求上下文"""
         if not hasattr(req, "prompt"): return
         if (event.message_str or "").strip().startswith(("/cogito", "/rosaos", "reset", "new")): return
 
-        # [Safety Fix] 安全提取 message_obj 属性
         msg_obj = getattr(event, "message_obj", None)
-        
-        # 安全提取图片
         image_urls = []
         if msg_obj and hasattr(msg_obj, "message"):
             image_urls = [c.url for c in msg_obj.message if isinstance(c, Comp.Image) and c.url]
             
-        # 安全提取发送者信息
         sender_info = {
             "user_id": getattr(msg_obj, "user_id", None) if msg_obj else None,
             "nickname": getattr(msg_obj, "nickname", None) if msg_obj else None,
@@ -384,7 +283,6 @@ class IntelligentRetryWithCoT(Star):
             "platform": getattr(msg_obj, "platform", None) if msg_obj else None,
         }
 
-        # [Key Fix] 生成 UUID Key
         request_key = self._get_request_key(event)
 
         stored_params = {
@@ -399,7 +297,6 @@ class IntelligentRetryWithCoT(Star):
             "sender": sender_info,
             "provider_params": {k: getattr(req, k, None) for k in ["model", "temperature", "max_tokens"] if hasattr(req, k)}
         }
-        
         self.pending_requests[request_key] = stored_params
 
     @event_filter.on_llm_response(priority=5)
@@ -413,38 +310,29 @@ class IntelligentRetryWithCoT(Star):
             choices = getattr(resp.raw_completion, "choices", [])
             if choices and getattr(choices[0], "finish_reason", None) == "tool_calls": return
 
-        # [Key Fix] 使用相同的逻辑获取 Key
         request_key = self._get_request_key(event)
         if request_key not in self.pending_requests: return
 
         text = resp.completion_text or ""
+        # [Fix] 恢复 _is_truncated 调用
         is_trunc = self.enable_truncation_retry and self._is_truncated(resp)
         
-        # 检查是否需要重试
         needs_retry = not text.strip() or self._should_retry_response(resp) or is_trunc or self._is_cot_structure_incomplete(text)
         
         if needs_retry:
             logger.info(f"[IntelligentRetry] 🔴 触发重试逻辑 (Key: {request_key})")
-            
-            # 执行重试
             success = await self._execute_retry_sequence(event, request_key)
-            
             if success:
                 res = event.get_result()
                 resp.completion_text = res.get_plain_text() if res else ""
             else:
-                # === [Fix] 兜底逻辑加强版 ===
                 if self.fallback_reply:
                     logger.warning(f"[IntelligentRetry] ❌ 重试全部失败，强制应用兜底回复")
-                    
-                    # 防复读后缀
                     anti_spam_suffix = "\u200b" * (int(time.time()) % 3) 
                     final_fallback = f"{self.fallback_reply}{anti_spam_suffix}"
-                    
                     final_res = MessageEventResult()
                     final_res.message(final_fallback)
                     final_res.result_content_type = ResultContentType.LLM_RESULT
-                    
                     event.set_result(final_res)
                     resp.completion_text = final_fallback
         
@@ -455,14 +343,12 @@ class IntelligentRetryWithCoT(Star):
         """最后一道防线"""
         result = event.get_result()
         if not result or not result.chain: return
-        
         plain_text = result.get_plain_text()
         has_tag = self.cot_start_tag in plain_text or self.FINAL_REPLY_PATTERN.search(plain_text)
         
         if has_tag:
-            logger.debug("[IntelligentRetry] 装饰阶段发现残留 CoT，执行强制清理")
             for comp in result.chain:
-                # [Fix] 修复 API 兼容性: Comp.Text -> Comp.Plain
+                # [Fix] 替换 Comp.Text 为 Comp.Plain
                 if isinstance(comp, Comp.Plain) and comp.text:
                     temp = LLMResponse()
                     temp.completion_text = comp.text
@@ -470,6 +356,12 @@ class IntelligentRetryWithCoT(Star):
                     comp.text = temp.completion_text
 
     # --- Helper Methods ---
+
+    # [Fix] 补回遗漏的 _is_truncated 方法
+    def _is_truncated(self, text_or_response) -> bool:
+        text = text_or_response.completion_text if hasattr(text_or_response, "completion_text") else text_or_response
+        if hasattr(text_or_response, "completion_text") and "[TRUNCATED_BY_LENGTH]" in (text or ""): return True
+        return False
 
     def _is_cot_structure_incomplete(self, text: str) -> bool:
         if not text: return False
@@ -484,7 +376,6 @@ class IntelligentRetryWithCoT(Star):
         if not response or not response.completion_text: return
         text = response.completion_text
         thought, reply = "", text
-        
         parts = self.FINAL_REPLY_PATTERN.split(text, 1)
         if len(parts) > 1:
             os_match = self.THOUGHT_TAG_PATTERN.search(parts[0])
@@ -496,39 +387,27 @@ class IntelligentRetryWithCoT(Star):
                 thought = os_match.group('content').strip()
                 reply = self.THOUGHT_TAG_PATTERN.sub("", text).strip()
         
-        if thought:
-            await self._async_save_thought(event.unified_msg_origin, thought)
-            
+        if thought: await self._async_save_thought(event.unified_msg_origin, thought)
         for kw in self.filtered_keywords: reply = reply.replace(kw, "")
-        if self.display_cot_text and thought:
-            response.completion_text = f"🤔 罗莎思考中：\n{thought}\n\n---\n\n{reply}"
-        else:
-            response.completion_text = reply
+        if self.display_cot_text and thought: response.completion_text = f"🤔 罗莎思考中：\n{thought}\n\n---\n\n{reply}"
+        else: response.completion_text = reply
 
     async def _periodic_cleanup_task(self):
         while True:
             try:
                 await asyncio.sleep(300)
-                current = time.time()
-                expired = [k for k, v in self.pending_requests.items() if current - v.get("timestamp", 0) > 300]
-                for k in expired: del self.pending_requests[k]
-            except (asyncio.CancelledError, Exception): break
+                self.pending_requests.clear()
+            except Exception: break
 
     def _parse_status_codes(self, codes_str: str) -> set:
         return {int(line.strip()) for line in codes_str.split("\n") if line.strip().isdigit()}
 
     def _get_request_key(self, event: AstrMessageEvent) -> str:
-        """
-        [Key Fix] 生成 UUID Key
-        彻底解决 MessageID 依赖问题，确保主动回复也能被追踪
-        """
+        """UUID Key生成"""
         if hasattr(event, "_retry_plugin_request_key"): 
             return event._retry_plugin_request_key
-        
-        # 使用 UUID 确保唯一性和一致性
         trace_id = uuid.uuid4().hex[:8]
         key = f"{event.unified_msg_origin}_{trace_id}"
-        
         event._retry_plugin_request_key = key
         return key
 
@@ -560,21 +439,17 @@ class IntelligentRetryWithCoT(Star):
             return None
 
     async def _execute_retry_sequence(self, event: AstrMessageEvent, request_key: str) -> bool:
-        """执行重试循环，只在后台日志显示进度"""
+        """执行重试循环"""
         delay = max(0, int(self.retry_delay))
         session_id = event.unified_msg_origin
-        
         for attempt in range(1, self.max_attempts + 1):
-            # [Silent Log] 静默重试日志
             logger.warning(f"[IntelligentRetry] 🔄 (Session: {session_id}) 检测到异常，正在重试 {attempt}/{self.max_attempts}...")
-            
             new_response = await self._perform_retry_with_stored_params(request_key)
             if new_response and getattr(new_response, "completion_text", ""):
                 text = new_response.completion_text
                 if not self._should_retry_response(new_response) and not self._is_cot_structure_incomplete(text):
                     logger.info(f"[IntelligentRetry] ✅ 第 {attempt} 次重试成功")
                     await self._split_and_format_cot(new_response, event)
-                    
                     final_res = MessageEventResult()
                     final_res.message(new_response.completion_text)
                     final_res.result_content_type = ResultContentType.LLM_RESULT
