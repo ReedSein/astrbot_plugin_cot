@@ -136,7 +136,7 @@ def sanitize_filename(session_id: str) -> str:
     "Rosaintelligent_retry_with_cot",
     "ReedSein",
     "集成了思维链(CoT)处理的智能重试插件。采用[Session热数据] + [每日全量归档] 混合存储架构。",
-    "3.6.0-Rosa-Hybrid",
+    "3.7.0-Rosa-Hybrid-Robust",
 )
 class IntelligentRetryWithCoT(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -171,7 +171,7 @@ class IntelligentRetryWithCoT(Star):
         self.summary_prompt_template = config.get("summary_prompt_template", 
             "请阅读以下机器人的'内心独白(Inner Thought)'日志，用简练、客观的语言总结其核心思考逻辑、情绪状态以及最终的决策意图。\n\n日志内容：\n{log}")
 
-        logger.info(f"[IntelligentRetry] 3.8.1 高清渲染版已加载。")
+        logger.info(f"[IntelligentRetry] 3.8.1 高清渲染版 (Robust) 已加载。")
 
     def _parse_config(self, config: AstrBotConfig) -> None:
         self.max_attempts = config.get("max_attempts", 3)
@@ -206,9 +206,6 @@ class IntelligentRetryWithCoT(Star):
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
             
-            # 渲染配置升级:
-            # 1. device_scale_factor=3: 3倍超采样，彻底解决文字边缘模糊
-            # 2. viewport width=640: 强制视口宽度，让卡片占满画面，消除左右黑边
             render_options = {
                 "device_scale_factor": 3, 
                 "viewport": {"width": 640, "height": 1000}, 
@@ -399,6 +396,12 @@ class IntelligentRetryWithCoT(Star):
 
     @event_filter.on_llm_response(priority=5)
     async def process_and_retry_on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
+        # 1. 优先执行 CoT 裁剪 (Robust Fix: 即使 Key 丢失也要裁剪)
+        # --------------------------------------------------------------------------------
+        if resp and hasattr(resp, "completion_text") and self.cot_start_tag in (resp.completion_text or ""):
+            logger.debug(f"[IntelligentRetry] 检测到 CoT 标签，执行无条件裁剪 (Key Check Bypass)")
+            await self._split_and_format_cot(resp, event)
+
         if self.max_attempts <= 0 or not hasattr(resp, "completion_text"): return
         if getattr(resp, "raw_completion", None):
             choices = getattr(resp.raw_completion, "choices", [])
@@ -410,6 +413,7 @@ class IntelligentRetryWithCoT(Star):
         text = resp.completion_text or ""
         is_trunc = self.enable_truncation_retry and self._is_truncated(resp)
         
+        # 检查是否需要重试
         if not text.strip() or self._should_retry_response(resp) or is_trunc or self._is_cot_structure_incomplete(text):
             logger.info(f"[IntelligentRetry] 触发重试 (Key: {request_key})")
             if await self._execute_retry_sequence(event, request_key):
@@ -418,17 +422,22 @@ class IntelligentRetryWithCoT(Star):
             else:
                 if self.fallback_reply: resp.completion_text = self.fallback_reply
         
-        await self._split_and_format_cot(resp, event)
+        # 清理 Key
         self.pending_requests.pop(request_key, None)
 
     @event_filter.on_decorating_result(priority=5)
     async def final_cot_stripper(self, event: AstrMessageEvent):
+        """
+        最后一道防线：装饰阶段再次检查文本链中是否残留了 CoT
+        """
         result = event.get_result()
         if not result or not result.chain: return
-        plain_text = result.get_plain_text()
         
+        plain_text = result.get_plain_text()
         has_tag = self.cot_start_tag in plain_text or self.FINAL_REPLY_PATTERN.search(plain_text)
+        
         if has_tag:
+            logger.debug("[IntelligentRetry] 装饰阶段发现残留 CoT，执行强制清理")
             for comp in result.chain:
                 if isinstance(comp, Comp.Text) and comp.text:
                     temp = LLMResponse()
