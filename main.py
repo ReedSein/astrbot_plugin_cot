@@ -5,6 +5,7 @@ import json
 import re
 import time
 import os
+import random
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +13,7 @@ from pathlib import Path
 import astrbot.api.message_components as Comp
 from astrbot.api import logger, AstrBotConfig
 from astrbot.api.star import Context, Star, register
-from astrbot.api.event import AstrMessageEvent, filter as event_filter
+from astrbot.api.event import AstrMessageEvent, filter as event_filter, MessageEventResult, ResultContentType
 from astrbot.api.provider import LLMResponse
 
 # --- 存储架构配置 ---
@@ -135,8 +136,8 @@ def sanitize_filename(session_id: str) -> str:
 @register(
     "Rosaintelligent_retry_with_cot",
     "ReedSein",
-    "集成了思维链(CoT)处理的智能重试插件。采用[Session热数据] + [每日全量归档] 混合存储架构。",
-    "3.7.0-Rosa-Hybrid-Robust",
+    "集成了思维链(CoT)处理的智能重试插件。修复了重试提示和兜底回复不生效的问题（完整版）。",
+    "3.8.4-Rosa-Full",
 )
 class IntelligentRetryWithCoT(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -171,7 +172,7 @@ class IntelligentRetryWithCoT(Star):
         self.summary_prompt_template = config.get("summary_prompt_template", 
             "请阅读以下机器人的'内心独白(Inner Thought)'日志，用简练、客观的语言总结其核心思考逻辑、情绪状态以及最终的决策意图。\n\n日志内容：\n{log}")
 
-        logger.info(f"[IntelligentRetry] 3.8.1 高清渲染版 (Robust) 已加载。")
+        logger.info(f"[IntelligentRetry] 3.8.4 完整修复版 (Full) 已加载。")
 
     def _parse_config(self, config: AstrBotConfig) -> None:
         self.max_attempts = config.get("max_attempts", 3)
@@ -397,7 +398,6 @@ class IntelligentRetryWithCoT(Star):
     @event_filter.on_llm_response(priority=5)
     async def process_and_retry_on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
         # 1. 优先执行 CoT 裁剪 (Robust Fix: 即使 Key 丢失也要裁剪)
-        # --------------------------------------------------------------------------------
         if resp and hasattr(resp, "completion_text") and self.cot_start_tag in (resp.completion_text or ""):
             logger.debug(f"[IntelligentRetry] 检测到 CoT 标签，执行无条件裁剪 (Key Check Bypass)")
             await self._split_and_format_cot(resp, event)
@@ -416,11 +416,31 @@ class IntelligentRetryWithCoT(Star):
         # 检查是否需要重试
         if not text.strip() or self._should_retry_response(resp) or is_trunc or self._is_cot_structure_incomplete(text):
             logger.info(f"[IntelligentRetry] 触发重试 (Key: {request_key})")
-            if await self._execute_retry_sequence(event, request_key):
+            
+            # 执行重试
+            success = await self._execute_retry_sequence(event, request_key)
+            
+            if success:
                 res = event.get_result()
                 resp.completion_text = res.get_plain_text() if res else ""
             else:
-                if self.fallback_reply: resp.completion_text = self.fallback_reply
+                # === 修复：重试彻底失败，强制应用兜底回复 ===
+                if self.fallback_reply:
+                    logger.warning("[IntelligentRetry] 重试全部失败，应用兜底回复")
+                    
+                    # 1. 添加随机微小噪音，防止被撤回插件判定为复读
+                    # 例如加入一个零宽空格，或者改变末尾标点
+                    anti_spam_suffix = "\u200b" * (int(time.time()) % 3) 
+                    final_fallback = f"{self.fallback_reply}{anti_spam_suffix}"
+                    
+                    # 2. 显式构建 Result 对象并 set_result
+                    # 这能确保覆盖掉 Core 产生的 API Error
+                    final_res = MessageEventResult()
+                    final_res.message(final_fallback)
+                    final_res.result_content_type = ResultContentType.LLM_RESULT
+                    
+                    event.set_result(final_res)
+                    resp.completion_text = final_fallback # 同步更新 resp 对象
         
         # 清理 Key
         self.pending_requests.pop(request_key, None)
@@ -535,10 +555,16 @@ class IntelligentRetryWithCoT(Star):
 
     async def _execute_retry_sequence(self, event: AstrMessageEvent, request_key: str) -> bool:
         delay = max(0, int(self.retry_delay))
+        session_id = event.unified_msg_origin
+        
         for attempt in range(1, self.max_attempts + 1):
+            # === 修改点：使用 logger.warning 代替 event.send ===
+            logger.warning(f"[IntelligentRetry] ⚠️ (Session: {session_id}) 检测到生成异常，正在进行第 {attempt}/{self.max_attempts} 次重试...")
+            
             new_response = await self._perform_retry_with_stored_params(request_key)
             if new_response and getattr(new_response, "completion_text", ""):
                 if not self._should_retry_response(new_response) and not self._is_cot_structure_incomplete(new_response.completion_text):
+                    logger.info(f"[IntelligentRetry] (Session: {session_id}) 第 {attempt} 次重试成功！")
                     await self._split_and_format_cot(new_response, event)
                     from astrbot.api.event import MessageEventResult, ResultContentType
                     final_res = MessageEventResult()
