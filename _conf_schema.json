@@ -56,8 +56,8 @@
   "error_keywords": {
     "description": "触发重试的错误关键词",
     "type": "text",
-    "hint": "当LLM的回复中包含这些关键词时，将触发重试。请每行输入一个关键词，不区分大小写。",
-    "default": "api 返回的内容为空\nAPI 返回的 completion 由于内容安全过滤被拒绝(非 AstrBot)"
+    "hint": "当LLM的回复或Core抛出的异常中包含这些关键词时，将触发重试。不区分大小写。",
+    "default": "api 返回的内容为空\n调用失败\n[TRUNCATED_BY_LENGTH]\nupstream error\ndo_request_failed\ninternal server error\n500\n429\nrate limit\ntimeout\ntimed out\nconnection error\nmax retries"
   },
   "retryable_status_codes": {
     "description": "允许重试的HTTP状态码(每行一个)",
