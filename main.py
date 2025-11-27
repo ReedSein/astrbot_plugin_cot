@@ -1,5 +1,3 @@
-# --- START OF FILE main.py ---
-
 import asyncio
 import json
 import re
@@ -137,8 +135,8 @@ def sanitize_filename(session_id: str) -> str:
 @register(
     "Rosaintelligent_retry_with_cot",
     "ReedSein",
-    "集成了思维链(CoT)处理的智能重试插件。v3.8.13 异常拦截版 (Interceptor)，专治500/429。",
-    "3.8.13-Rosa-Interceptor-Full",
+    "集成了思维链(CoT)处理的智能重试插件。v3.8.14 异常拦截终极版 (Interceptor Pro)，专治超时与网络波动。",
+    "3.8.14-Rosa-Interceptor-Pro",
 )
 class IntelligentRetryWithCoT(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -168,14 +166,14 @@ class IntelligentRetryWithCoT(Star):
         self.summary_timeout = int(config.get("summary_timeout", 60))
         self.summary_prompt_template = config.get("summary_prompt_template", "总结日志：\n{log}")
 
-        logger.info(f"[IntelligentRetry] 3.8.13 异常拦截版已加载。")
+        logger.info(f"[IntelligentRetry] 3.8.14 异常拦截终极版已加载。")
 
     def _parse_config(self, config: AstrBotConfig) -> None:
         self.max_attempts = config.get("max_attempts", 3)
         self.retry_delay = config.get("retry_delay", 2)
         
         # [Config] 扩充异常检测词库
-        default_keywords = "api 返回的内容为空\n调用失败\n[TRUNCATED_BY_LENGTH]\nupstream error\ndo_request_failed\ninternal server error\n500\n429\nrate limit"
+        default_keywords = "api 返回的内容为空\n调用失败\n[TRUNCATED_BY_LENGTH]\nupstream error\ndo_request_failed\ninternal server error\n500\n429\nrate limit\ntimeout\ntimed out"
         keywords_str = config.get("error_keywords", default_keywords)
         self.error_keywords = [k.strip().lower() for k in keywords_str.split("\n") if k.strip()]
 
@@ -338,7 +336,7 @@ class IntelligentRetryWithCoT(Star):
     async def intercept_api_error(self, event: AstrMessageEvent):
         """
         [NEW] 异常拦截层 (Priority=20)
-        专门捕获 AstrBot Core 因 Provider 抛出异常 (500, 429) 而生成的报错消息。
+        捕获 Core 因 Provider 抛出异常 (Timeout, 500, 429) 而生成的报错消息。
         这些异常会导致 on_llm_response 被跳过，必须在这里拦截。
         """
         request_key = self._get_request_key(event)
@@ -348,24 +346,44 @@ class IntelligentRetryWithCoT(Star):
         if not result: return
         
         text = result.get_plain_text() or ""
-        # 检测是否是 Core 生成的报错信息 (特征匹配)
-        is_core_error = "AstrBot 请求失败" in text or "Error code:" in text or "InternalServerError" in text or "RateLimitError" in text
+        text_lower = text.lower()
+
+        # --- 核心修复：更广泛的异常特征库 ---
+        core_error_signatures = [
+            "astrbot 请求失败",
+            "error code:",
+            "internalservererror",
+            "ratelimiterror",
+            "timeout",         # 捕获各类超时
+            "timed out",
+            "connection error",
+            "connection refused",
+            "max retries",
+            "remote disconnected",
+            "socket error",
+            "ssl error"
+        ]
+
+        # 同时匹配 硬编码特征 和 用户配置的关键词
+        is_core_signature = any(sig in text_lower for sig in core_error_signatures)
+        is_config_keyword = any(kw in text_lower for kw in self.error_keywords)
+        
+        is_core_error = is_core_signature or is_config_keyword
         
         if is_core_error:
-            logger.warning(f"[IntelligentRetry] 🛡️ 拦截到 Core 异常消息 (Key: {request_key})，启动紧急重试")
+            logger.warning(f"[IntelligentRetry] 🛡️ 拦截到 Core 异常消息 (Key: {request_key}) | 内容片段: {text[:50]}...")
             
             # 启动重试
             success = await self._execute_retry_sequence(event, request_key)
             
             if success:
-                # 重试成功，event 结果已被更新
                 logger.info(f"[IntelligentRetry] 🛡️ 异常拦截重试成功！")
             else:
                 # 重试失败，强制应用兜底
                 if self.fallback_reply:
                     self._apply_fallback(event)
             
-            # 清理 Key
+            # 清理 Key，避免重复处理
             self.pending_requests.pop(request_key, None)
 
     @event_filter.on_decorating_result(priority=5)
@@ -472,9 +490,15 @@ class IntelligentRetryWithCoT(Star):
                 kwargs["conversation"].metadata["sender"] = stored.get("sender", {})
             else: kwargs["contexts"] = stored.get("contexts", [])
             kwargs.update(stored.get("provider_params", {}))
+            
+            # --- 核心修复：防御性调用 ---
+            # 这里的调用可能会再次因为网络问题抛出异常
+            # 我们必须捕获它，否则会中断重试循环，导致插件直接报错退出
             return await provider.text_chat(**kwargs)
+            
         except Exception as e:
-            logger.error(f"重试异常: {e}")
+            logger.error(f"[IntelligentRetry] ⚠️ 重试尝试失败 (Provider API 抛出异常): {e}")
+            # 返回 None，告知上层本次重试失败，继续下一次循环或进入兜底
             return None
 
     async def _execute_retry_sequence(self, event: AstrMessageEvent, request_key: str) -> bool:
@@ -482,8 +506,11 @@ class IntelligentRetryWithCoT(Star):
         delay = max(0, int(self.retry_delay))
         session_id = event.unified_msg_origin
         for attempt in range(1, self.max_attempts + 1):
-            logger.warning(f"[IntelligentRetry] 🔄 (Session: {session_id}) 检测到异常，正在重试 {attempt}/{self.max_attempts}...")
+            logger.warning(f"[IntelligentRetry] 🔄 (Session: {session_id}) 检测到异常/超时，正在重试 {attempt}/{self.max_attempts}...")
+            
+            # 这里调用 _perform_retry_with_stored_params 现在是安全的
             new_response = await self._perform_retry_with_stored_params(request_key)
+            
             if new_response and getattr(new_response, "completion_text", ""):
                 text = new_response.completion_text
                 if not self._should_retry_response(new_response) and not self._is_cot_structure_incomplete(text):
@@ -494,7 +521,11 @@ class IntelligentRetryWithCoT(Star):
                     final_res.result_content_type = ResultContentType.LLM_RESULT
                     event.set_result(final_res)
                     return True
-            if attempt < self.max_attempts: await asyncio.sleep(delay)
+            
+            # 如果不是最后一次尝试，则等待
+            if attempt < self.max_attempts: 
+                await asyncio.sleep(delay)
+        
         return False
 
     async def terminate(self):
