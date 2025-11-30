@@ -169,5 +169,11 @@
     "type": "int",
     "hint": "无论如何计算，并发数都不会超过此值。建议5-20之间。",
     "default": 10
+  },
+  "exclude_retry_commands": {
+    "description": "排除重试的命令列表",
+    "type": "text",
+    "hint": "这些命令触发的 LLM 请求不会被重试机制处理。每行一个命令，支持不同的命令前缀（如 /、&、! 等）。示例：/cogito、&cogito、/rosaos",
+    "default": "/cogito\n/rosaos\nreset\nnew"
   }
 }
