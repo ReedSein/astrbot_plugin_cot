@@ -175,7 +175,13 @@ class IntelligentRetryWithCoT(Star):
         self.retry_delay = config.get("retry_delay", 2)
         
         # [Config] 扩充异常检测词库 (用于 on_llm_response)
-        default_keywords = "api 返回的内容为空\n调用失败\n[TRUNCATED_BY_LENGTH]\nupstream error\ndo_request_failed\ninternal server error\n500\n429\nrate limit\ntimeout\ntimed out\nconnection error\nmax retries"
+        # v3.0.0: Updated error keywords
+        default_keywords = (
+            "达到最大长度限制而被截断\n"
+            "exception\n"
+            "error\n"
+            "timeout"
+        )
         keywords_str = config.get("error_keywords", default_keywords)
         self.error_keywords = [k.strip().lower() for k in keywords_str.split("\n") if k.strip()]
 
@@ -184,6 +190,14 @@ class IntelligentRetryWithCoT(Star):
         self.fallback_reply = config.get("fallback_reply", "抱歉，服务波动，罗莎暂时无法回应。")
         self.enable_truncation_retry = config.get("enable_truncation_retry", False)
         self.force_cot_structure = config.get("force_cot_structure", True)
+
+        # 配置化排除命令列表
+        exclude_commands_str = config.get("exclude_retry_commands", "/cogito\n/rosaos\nreset\nnew")
+        self.exclude_retry_commands = [
+            cmd.strip().lower() 
+            for cmd in exclude_commands_str.split("\n") 
+            if cmd.strip()
+        ]
 
     # ======================= 渲染辅助 =======================
     async def _render_and_reply(self, event: AstrMessageEvent, title: str, subtitle: str, content: str):
@@ -267,7 +281,10 @@ class IntelligentRetryWithCoT(Star):
     async def store_llm_request(self, event: AstrMessageEvent, req):
         """记录请求上下文"""
         if not hasattr(req, "prompt"): return
-        if (event.message_str or "").strip().startswith(("/cogito", "/rosaos", "reset", "new")): return
+        # 检查是否是排除命令（配置化）
+        msg_lower = (event.message_str or "").strip().lower()
+        if any(msg_lower.startswith(cmd) for cmd in self.exclude_retry_commands):
+            return
 
         msg_obj = getattr(event, "message_obj", None)
         image_urls = []
@@ -290,7 +307,8 @@ class IntelligentRetryWithCoT(Star):
             "system_prompt": getattr(req, "system_prompt", ""),
             "func_tool": getattr(req, "func_tool", None),
             "unified_msg_origin": event.unified_msg_origin,
-            "conversation": getattr(req, "conversation", None),
+            # Bug 1.1: Store conversation_id instead of live object
+            "conversation_id": getattr(req.conversation, "id", None) if hasattr(req, "conversation") else None,
             "timestamp": time.time(),
             "sender": sender_info,
             "provider_params": {k: getattr(req, k, None) for k in ["model", "temperature", "max_tokens"] if hasattr(req, k)}
@@ -332,7 +350,7 @@ class IntelligentRetryWithCoT(Star):
                     # 尝试同步更新 resp 以防万一
                     resp.completion_text = self.fallback_reply
         
-        self.pending_requests.pop(request_key, None)
+        # Cleanup moved to intercept_api_error for better edge case handling
 
     @event_filter.on_decorating_result(priority=20)
     async def intercept_api_error(self, event: AstrMessageEvent):
@@ -344,38 +362,15 @@ class IntelligentRetryWithCoT(Star):
         if request_key not in self.pending_requests: return
 
         result = event.get_result()
-        if not result: return
         
         text = result.get_plain_text() or ""
-        if not text: return
 
-        # --- Regex 匹配逻辑 (更强健) ---
-        # 1. 匹配标准 Core 报错头: "AstrBot 请求失败" 且包含 "错误"
-        is_astrbot_fail = "AstrBot" in text and "请求失败" in text
-
-        # 2. 匹配具体的错误类型特征 (不区分大小写)
-        # 包含了你提供的 502, 503, 500, APITimeoutError, Request timed out 等
-        error_patterns = [
-            r"Error\s*code:\s*5\d{2}",       # 匹配 500, 502, 503, 504...
-            r"APITimeoutError",              # 匹配 APITimeoutError
-            r"Request\s*timed\s*out",        # 匹配 Request timed out
-            r"InternalServerError",          # 匹配 InternalServerError
-            r"count_token_failed",           # 匹配 token 计算失败
-            r"bad_response_status_code",     # 匹配 status code error
-            r"connection\s*error",
-            r"remote\s*disconnected",
-            r"read\s*timeout",
-            r"connect\s*timeout"
-        ]
-        
-        combined_pattern = re.compile("|".join(error_patterns), re.IGNORECASE)
-        has_error_pattern = bool(combined_pattern.search(text))
-
-        # 3. 匹配用户配置的关键词
+        # 使用统一的错误检测逻辑
+        has_api_error = self._has_api_error_pattern(text)
         has_config_keyword = any(kw.lower() in text.lower() for kw in self.error_keywords)
 
-        # 判定逻辑：如果是 AstrBot 失败开头，或者包含明确错误模式，或者包含配置关键词
-        if is_astrbot_fail or has_error_pattern or has_config_keyword:
+        # 判定逻辑：如果检测到 API 错误或包含配置关键词
+        if has_api_error or has_config_keyword:
             logger.warning(f"[IntelligentRetry] 🛡️ 拦截到 Core 异常 (Key: {request_key})")
             
             # --- CRITICAL FIX: 立即阻断原始报错 ---
@@ -392,7 +387,7 @@ class IntelligentRetryWithCoT(Star):
                 if self.fallback_reply:
                     self._apply_fallback(event)
             
-            # 清理 Key
+            # 清理 pending_requests
             self.pending_requests.pop(request_key, None)
 
     @event_filter.on_decorating_result(priority=5)
@@ -481,9 +476,74 @@ class IntelligentRetryWithCoT(Star):
         text = getattr(result, "completion_text", "") or ""
         if not text and hasattr(result, "get_plain_text"): text = result.get_plain_text()
         if not (text or "").strip(): return True
+        
+        # Keyword-based detection
         for kw in self.error_keywords:
             if kw in text.lower(): return True
+        
+        # Regex-based detection (unified with intercept_api_error)
+        if self._has_api_error_pattern(text):
+            return True
+            
         return False
+    
+    def _has_api_error_pattern(self, text: str) -> bool:
+        """统一的 API 错误检测逻辑（正则表达式）"""
+        if not text: return False
+        
+        # 1. AstrBot 失败标记
+        is_astrbot_fail = "AstrBot" in text and "请求失败" in text
+        if is_astrbot_fail: return True
+        
+        # 2. 错误模式匹配
+        error_patterns = [
+            r"Error\s*code:\s*5\d{2}",       # 500, 502, 503, 504...
+            r"APITimeoutError",
+            r"Request\s*timed\s*out",
+            r"InternalServerError",
+            r"count_token_failed",
+            r"bad_response_status_code",
+            r"connection\s*error",
+            r"remote\s*disconnected",
+            r"read\s*timeout",
+            r"connect\s*timeout"
+        ]
+        
+        combined_pattern = re.compile("|".join(error_patterns), re.IGNORECASE)
+        return bool(combined_pattern.search(text))
+
+    async def _fix_user_history(self, event: AstrMessageEvent, request_key: str, bot_reply: str = None):
+        """
+        Bug 1.3: Manually add the user's prompt to the conversation history
+        to prevent disjointed context (assistant -> assistant).
+        """
+        try:
+            stored_params = self.pending_requests.get(request_key)
+            if not stored_params: return
+
+            conv_mgr = self.context.conversation_manager
+            umo = event.unified_msg_origin
+            cid = stored_params.get("conversation_id")
+            if not cid: cid = await conv_mgr.get_curr_conversation_id(umo)
+            
+            conv = await conv_mgr.get_conversation(umo, cid)
+            prompt = stored_params.get("prompt")
+
+            if conv and prompt:
+                history_list = json.loads(conv.history) if conv.history else []
+                if not history_list or history_list[-1].get("content") != prompt:
+                    history_list.append({"role": "user", "content": prompt})
+                    logger.debug(f"已为会话 {cid} 手动补全用户历史记录")
+                
+                if bot_reply:
+                    history_list.append({"role": "assistant", "content": bot_reply})
+                    logger.debug(f"已为会话 {cid} 手动补全Bot回复历史记录")
+
+                await self.context.conversation_manager.update_conversation(
+                    unified_msg_origin=umo, conversation_id=cid, history=history_list
+                )
+        except Exception as e:
+            logger.error(f"手动补全历史记录时出错: {e}", exc_info=True)
 
     async def _perform_retry_with_stored_params(self, request_key: str) -> Optional[Any]:
         if request_key not in self.pending_requests: return None
@@ -492,12 +552,28 @@ class IntelligentRetryWithCoT(Star):
         if not provider: return None
         try:
             kwargs = {k: stored.get(k) for k in ["prompt", "image_urls", "func_tool", "system_prompt"]}
-            if stored.get("conversation"):
-                kwargs["conversation"] = stored["conversation"]
-                if not hasattr(kwargs["conversation"], "metadata") or not kwargs["conversation"].metadata:
-                    kwargs["conversation"].metadata = {}
-                kwargs["conversation"].metadata["sender"] = stored.get("sender", {})
-            else: kwargs["contexts"] = stored.get("contexts", [])
+            
+            # Bug 1.1 & 1.2: Reconstruct conversation and contexts
+            conversation_id = stored.get("conversation_id")
+            unified_msg_origin = stored.get("unified_msg_origin")
+            
+            if conversation_id and unified_msg_origin:
+                conv_mgr = getattr(self.context, "conversation_manager", None)
+                if conv_mgr:
+                    conversation = await conv_mgr.get_conversation(unified_msg_origin, conversation_id)
+                    if conversation:
+                        kwargs["conversation"] = conversation
+                        # Restore sender info if needed
+                        if not hasattr(conversation, "metadata") or not conversation.metadata:
+                            conversation.metadata = {}
+                        conversation.metadata["sender"] = stored.get("sender", {})
+
+            # Bug 1.2: Context reconstruction
+            contexts = stored.get("contexts", [])
+            if stored.get("prompt"):
+                contexts.append({"role": "user", "content": stored["prompt"]})
+            kwargs["contexts"] = contexts
+            
             kwargs.update(stored.get("provider_params", {}))
             
             # --- 核心修复：防御性调用 ---
@@ -520,6 +596,9 @@ class IntelligentRetryWithCoT(Star):
                 text = new_response.completion_text
                 if not self._should_retry_response(new_response) and not self._is_cot_structure_incomplete(text):
                     logger.info(f"[IntelligentRetry] ✅ 第 {attempt} 次重试成功")
+                                        # Bug 1.3: Fix history
+                    await self._fix_user_history(event, request_key, bot_reply=text)
+                    
                     await self._split_and_format_cot(new_response, event)
                     final_res = MessageEventResult()
                     final_res.message(new_response.completion_text)
