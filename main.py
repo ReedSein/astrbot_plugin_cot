@@ -137,8 +137,8 @@ def sanitize_filename(session_id: str) -> str:
 @register(
     "Rosaintelligent_retry_with_cot",
     "ReedSein",
-    "集成了思维链(CoT)处理的智能重试插件。v3.8.16 异常拦截物理静音版 (Physical Silence)，修复503泄漏与重试上下文丢失。",
-    "3.8.16-Physical-Silence",
+    "集成了思维链(CoT)处理的智能重试插件。v3.8.17 绿灯补丁版，修复 SpectreCore 静默指令被误判重试的问题。",
+    "3.8.17-SpectreCore-GreenLight",
 )
 class IntelligentRetryWithCoT(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -168,7 +168,7 @@ class IntelligentRetryWithCoT(Star):
         self.summary_timeout = int(config.get("summary_timeout", 60))
         self.summary_prompt_template = config.get("summary_prompt_template", "总结日志：\n{log}")
 
-        logger.info(f"[IntelligentRetry] 3.8.16 Physical Silence 已加载。")
+        logger.info(f"[IntelligentRetry] 3.8.17 SpectreCore-GreenLight 已加载。")
 
     def _parse_config(self, config: AstrBotConfig) -> None:
         self.max_attempts = config.get("max_attempts", 3)
@@ -330,6 +330,16 @@ class IntelligentRetryWithCoT(Star):
         if request_key not in self.pending_requests: return
 
         text = getattr(resp, "completion_text", "") or ""
+
+        # ================= [SpectreCore 绿灯通道] =================
+        # 如果检测到静默标记，直接视为成功，跳过所有重试检查
+        # 此时 text 已经被 _split_and_format_cot 清洗过，如果 LLM 输出了 <NO_RESPONSE>
+        # 那么现在的 text 就仅仅包含 <NO_RESPONSE>
+        if "<NO_RESPONSE>" in text:
+            logger.info(f"[IntelligentRetry] 🟢 检测到 <NO_RESPONSE>，放行静默请求 (Key: {request_key})")
+            return
+        # ========================================================
+
         is_trunc = self.enable_truncation_retry and self._is_truncated(resp)
         
         # [Check] 检查原始响应是否包含报错
