@@ -395,8 +395,11 @@ class IntelligentRetryWithCoT(Star):
         text = getattr(resp, "completion_text", "") or ""
         
         # 2. 检查 Layer 0 是否传递了失败信号
-        layer0_failed = "ROSA_INTERNAL_ERROR" in text or (hasattr(resp, "raw_completion") and resp.raw_completion.get("failed"))
-
+        raw = getattr(resp, "raw_completion", None)
+        # 只有当 raw 是字典时才调用 .get，否则视为正常对象
+        is_dict_failure = isinstance(raw, dict) and raw.get("failed", False)
+        layer0_failed = "ROSA_INTERNAL_ERROR" in text or is_dict_failure
+        # --- 修复结束 ---
         is_trunc = self.enable_truncation_retry and self._is_truncated(resp)
         is_error = "error" in text.lower() and ("upstream" in text.lower() or "500" in text.lower())
 
