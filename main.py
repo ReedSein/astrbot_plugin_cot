@@ -137,8 +137,8 @@ def sanitize_filename(session_id: str) -> str:
 @register(
     "Rosaintelligent_retry_with_cot",
     "ReedSein",
-    "集成了思维链(CoT)处理的智能重试插件。v3.8.17 绝对防御版 (Absolute Guard)，修复 APITimeoutError 泄漏问题。",
-    "3.8.17-Absolute-Guard",
+    "集成了思维链(CoT)处理的智能重试插件。v3.8.17 绿灯补丁版，修复 SpectreCore 静默指令被误判重试的问题。",
+    "3.8.17-SpectreCore-GreenLight",
 )
 class IntelligentRetryWithCoT(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -168,7 +168,7 @@ class IntelligentRetryWithCoT(Star):
         self.summary_timeout = int(config.get("summary_timeout", 60))
         self.summary_prompt_template = config.get("summary_prompt_template", "总结日志：\n{log}")
 
-        logger.info(f"[IntelligentRetry] 3.8.17 Absolute Guard 已加载。")
+        logger.info(f"[IntelligentRetry] 3.8.17 SpectreCore-GreenLight 已加载。")
 
     def _parse_config(self, config: AstrBotConfig) -> None:
         self.max_attempts = config.get("max_attempts", 3)
@@ -330,6 +330,16 @@ class IntelligentRetryWithCoT(Star):
         if request_key not in self.pending_requests: return
 
         text = getattr(resp, "completion_text", "") or ""
+
+        # ================= [SpectreCore 绿灯通道] =================
+        # 如果检测到静默标记，直接视为成功，跳过所有重试检查
+        # 此时 text 已经被 _split_and_format_cot 清洗过，如果 LLM 输出了 <NO_RESPONSE>
+        # 那么现在的 text 就仅仅包含 <NO_RESPONSE>
+        if "<NO_RESPONSE>" in text:
+            logger.info(f"[IntelligentRetry] 🟢 检测到 <NO_RESPONSE>，放行静默请求 (Key: {request_key})")
+            return
+        # ========================================================
+
         is_trunc = self.enable_truncation_retry and self._is_truncated(resp)
         
         # [Check] 检查原始响应是否包含报错
@@ -358,30 +368,28 @@ class IntelligentRetryWithCoT(Star):
     async def intercept_api_error(self, event: AstrMessageEvent):
         """
         [NEW] 异常拦截层 (Priority=20) - 物理静音版
+        使用正则表达式强力捕获 Core 抛出的格式化异常。
         """
         request_key = self._get_request_key(event)
+        # Fix: 不要在这里做 pop 操作，否则重试中途如果并发触发，Key 没了会导致重试失败。
+        # 依赖 _periodic_cleanup_task 清理即可。
         if request_key not in self.pending_requests: return
 
         result = event.get_result()
         if not result: return
 
-        # --- 暴力提取文本 ---
-        # 不仅仅依赖 get_plain_text，还要检查原始组件，确保无死角
-        raw_text = ""
-        if result.chain:
-            raw_text = "".join([str(c) for c in result.chain])
-        else:
-            raw_text = result.get_plain_text() or ""
-        
-        # --- 错误检测 ---
-        has_api_error = self._has_api_error_pattern(raw_text)
-        has_config_keyword = any(kw.lower() in raw_text.lower() for kw in self.error_keywords)
+        text = result.get_plain_text() or ""
 
+        # 使用统一的错误检测逻辑
+        has_api_error = self._has_api_error_pattern(text)
+        has_config_keyword = any(kw.lower() in text.lower() for kw in self.error_keywords)
+
+        # 判定逻辑：如果检测到 API 错误或包含配置关键词
         if has_api_error or has_config_keyword:
-            logger.warning(f"[IntelligentRetry] 🛡️ 拦截到 Core 异常 (Key: {request_key}) | Err: {raw_text[:50]}...")
+            logger.warning(f"[IntelligentRetry] 🛡️ 拦截到 Core 异常 (Key: {request_key}) | 内容片段: {text[:50]}...")
             
-            # --- CRITICAL FIX: 偷梁换柱 ---
-            # 直接替换为一个干净的空对象，断绝任何被发送的可能
+            # --- CRITICAL FIX: 物理静音 ---
+            # 必须彻底清空 Chain，否则 Core 可能会发送残余信息
             self._silence_event(event)
             
             # 启动重试
@@ -393,6 +401,8 @@ class IntelligentRetryWithCoT(Star):
                 # 重试失败，强制应用兜底
                 if self.fallback_reply:
                     self._apply_fallback(event)
+            
+            # Fix: 移除 pop 操作，保持上下文直到自然过期
 
     @event_filter.on_decorating_result(priority=5)
     async def final_cot_stripper(self, event: AstrMessageEvent):
@@ -414,15 +424,25 @@ class IntelligentRetryWithCoT(Star):
 
     def _silence_event(self, event: AstrMessageEvent):
         """
-        [NEW] 物理静音：替换整个 Result 对象
+        [NEW] 物理静音：清空消息链，防止报错泄漏
+        这比 set_result(None) 更安全，因为它保留了对象但清空了内容。
         """
-        # 创建一个全新的空对象，确保没有残留的错误信息
-        empty_res = MessageEventResult()
-        empty_res.chain = [] # 空链
-        empty_res.use_raw = False # 禁用原始消息回退
-        
-        # 强制覆盖
-        event.set_result(empty_res)
+        result = event.get_result()
+        if result:
+            # 清空消息组件列表
+            if result.chain:
+                result.chain.clear()
+            # 清空文本缓存
+            if hasattr(result, "plain_text"): 
+                result.plain_text = ""
+            # 确保不回退到 raw_message
+            if hasattr(result, "use_raw"):
+                result.use_raw = False
+        else:
+            # 如果没有 result，创建一个空的
+            empty_res = MessageEventResult()
+            empty_res.chain = []
+            event.set_result(empty_res)
 
     def _apply_fallback(self, event: AstrMessageEvent):
         """应用兜底回复"""
@@ -504,18 +524,18 @@ class IntelligentRetryWithCoT(Star):
         return False
     
     def _has_api_error_pattern(self, text: str) -> bool:
-        """统一的 API 错误检测逻辑"""
+        """统一的 API 错误检测逻辑（正则表达式）"""
         if not text: return False
         
-        # --- Fix 3: 绝对匹配（针对 APITimeoutError）---
-        # 不再依赖正则，直接检测特定字符串
-        if "AstrBot 请求失败" in text: return True
-        if "APITimeoutError" in text: return True
-        if "Request timed out" in text: return True
+        # 1. AstrBot 失败标记
+        is_astrbot_fail = "AstrBot" in text and "请求失败" in text
+        if is_astrbot_fail: return True
         
-        # 2. 传统错误模式匹配
+        # 2. 错误模式匹配
         error_patterns = [
             r"Error\s*code:\s*5\d{2}",       # 500, 502, 503, 504...
+            r"APITimeoutError",
+            r"Request\s*timed\s*out",
             r"InternalServerError",
             r"count_token_failed",
             r"bad_response_status_code",
