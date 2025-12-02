@@ -137,8 +137,8 @@ def sanitize_filename(session_id: str) -> str:
 @register(
     "Rosaintelligent_retry_with_cot",
     "ReedSein",
-    "集成了思维链(CoT)处理的智能重试插件。v3.8.17 绿灯补丁版，修复 SpectreCore 静默指令被误判重试的问题。",
-    "3.8.17-SpectreCore-GreenLight",
+    "集成了思维链(CoT)处理的智能重试插件。v3.8.17 幽灵静音版 (Ghost Silence)，Priority 1000 + Zero-Width Hack。",
+    "3.8.17-Ghost-Silence",
 )
 class IntelligentRetryWithCoT(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -168,7 +168,7 @@ class IntelligentRetryWithCoT(Star):
         self.summary_timeout = int(config.get("summary_timeout", 60))
         self.summary_prompt_template = config.get("summary_prompt_template", "总结日志：\n{log}")
 
-        logger.info(f"[IntelligentRetry] 3.8.17 SpectreCore-GreenLight 已加载。")
+        logger.info(f"[IntelligentRetry] 3.8.17 Ghost Silence 已加载。")
 
     def _parse_config(self, config: AstrBotConfig) -> None:
         self.max_attempts = config.get("max_attempts", 3)
@@ -330,16 +330,6 @@ class IntelligentRetryWithCoT(Star):
         if request_key not in self.pending_requests: return
 
         text = getattr(resp, "completion_text", "") or ""
-
-        # ================= [SpectreCore 绿灯通道] =================
-        # 如果检测到静默标记，直接视为成功，跳过所有重试检查
-        # 此时 text 已经被 _split_and_format_cot 清洗过，如果 LLM 输出了 <NO_RESPONSE>
-        # 那么现在的 text 就仅仅包含 <NO_RESPONSE>
-        if "<NO_RESPONSE>" in text:
-            logger.info(f"[IntelligentRetry] 🟢 检测到 <NO_RESPONSE>，放行静默请求 (Key: {request_key})")
-            return
-        # ========================================================
-
         is_trunc = self.enable_truncation_retry and self._is_truncated(resp)
         
         # [Check] 检查原始响应是否包含报错
@@ -364,15 +354,13 @@ class IntelligentRetryWithCoT(Star):
                     # 尝试同步更新 resp 以防万一
                     resp.completion_text = self.fallback_reply
         
-    @event_filter.on_decorating_result(priority=20)
+    @event_filter.on_decorating_result(priority=1000)
     async def intercept_api_error(self, event: AstrMessageEvent):
         """
-        [NEW] 异常拦截层 (Priority=20) - 物理静音版
-        使用正则表达式强力捕获 Core 抛出的格式化异常。
+        [NEW] 异常拦截层 (Priority=1000) - Ghost Silence
+        优先级调至 1000，确保我们在所有默认处理器之后运行，从而能覆盖它们写入的错误信息。
         """
         request_key = self._get_request_key(event)
-        # Fix: 不要在这里做 pop 操作，否则重试中途如果并发触发，Key 没了会导致重试失败。
-        # 依赖 _periodic_cleanup_task 清理即可。
         if request_key not in self.pending_requests: return
 
         result = event.get_result()
@@ -388,8 +376,8 @@ class IntelligentRetryWithCoT(Star):
         if has_api_error or has_config_keyword:
             logger.warning(f"[IntelligentRetry] 🛡️ 拦截到 Core 异常 (Key: {request_key}) | 内容片段: {text[:50]}...")
             
-            # --- CRITICAL FIX: 物理静音 ---
-            # 必须彻底清空 Chain，否则 Core 可能会发送残余信息
+            # --- CRITICAL FIX: 零宽静音 ---
+            # 必须在 await 之前同步执行！
             self._silence_event(event)
             
             # 启动重试
@@ -402,8 +390,6 @@ class IntelligentRetryWithCoT(Star):
                 if self.fallback_reply:
                     self._apply_fallback(event)
             
-            # Fix: 移除 pop 操作，保持上下文直到自然过期
-
     @event_filter.on_decorating_result(priority=5)
     async def final_cot_stripper(self, event: AstrMessageEvent):
         """最后一道防线"""
@@ -424,25 +410,29 @@ class IntelligentRetryWithCoT(Star):
 
     def _silence_event(self, event: AstrMessageEvent):
         """
-        [NEW] 物理静音：清空消息链，防止报错泄漏
-        这比 set_result(None) 更安全，因为它保留了对象但清空了内容。
+        [NEW] 幽灵静音：使用零宽空格欺骗适配器
         """
         result = event.get_result()
-        if result:
-            # 清空消息组件列表
-            if result.chain:
-                result.chain.clear()
-            # 清空文本缓存
-            if hasattr(result, "plain_text"): 
-                result.plain_text = ""
-            # 确保不回退到 raw_message
-            if hasattr(result, "use_raw"):
-                result.use_raw = False
-        else:
-            # 如果没有 result，创建一个空的
-            empty_res = MessageEventResult()
-            empty_res.chain = []
-            event.set_result(empty_res)
+        if not result:
+            result = MessageEventResult()
+            event.set_result(result)
+        
+        # 1. 彻底清空组件链
+        if result.chain:
+            result.chain.clear()
+            
+        # 2. 注入零宽空格 (Zero Width Space)
+        # 这让适配器认为有内容要发，但实际上发出去是不可见的，或者被视为“已处理”
+        # 这样可以防止适配器回退到“未处理错误”逻辑
+        result.chain.append(Comp.Plain("\u200b")) 
+        
+        # 3. 清空文本缓存
+        if hasattr(result, "plain_text"): 
+            result.plain_text = ""
+            
+        # 4. 强制禁用 raw 模式，防止原始错误文本泄漏
+        if hasattr(result, "use_raw"):
+            result.use_raw = False
 
     def _apply_fallback(self, event: AstrMessageEvent):
         """应用兜底回复"""
