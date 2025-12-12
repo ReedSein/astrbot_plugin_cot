@@ -1,41 +1,45 @@
 {
-  "__group_core_cot__": {
-    "title": "核心 CoT 设置",
-    "description": "配置思维链（Chain of Thought）的核心识别标签和展示方式。"
-  },
-  "cot_start_tag": {
-    "description": "CoT 起始标签",
-    "type": "string",
-    "hint": "用于识别‘罗莎内心OS’开始的标签。",
-    "default": "<罗莎内心OS>"
-  },
-  "cot_end_tag": {
-    "description": "CoT 结束标签",
-    "type": "string",
-    "hint": "用于识别‘罗莎内心OS’结束的标签。",
-    "default": "</罗莎内心OS>"
-  },
-  "final_reply_pattern": {
-    "description": "最终回复切分正则",
-    "type": "string",
-    "hint": "用于从包含CoT的文本中分离出最终回复的正则表达式。",
-    "default": "最终的罗莎回复[:：]?\\s*"
-  },
-  "display_cot_text": {
-    "description": "回复中显示思考过程",
+  "force_cot_structure": {
+    "description": "强制CoT结构 (核心功能)",
     "type": "bool",
-    "hint": "开启后，最终的回复会附带上本次的‘罗莎内心OS’内容。",
-    "default": false
+    "hint": "开启后，任何不包含<罗莎内心OS>和'最终的罗莎回复'结构的LLM响应都将被视为无效并触发重试。强烈建议为罗莎人格保持开启。",
+    "default": true
   },
-  "filtered_keywords": {
-    "description": "回复过滤词列表",
+  "history_limit": {
+    "description": "热数据保留条数",
+    "type": "int",
+    "hint": "在快速访问存储(JSON)中保留的最近内心OS记录数量。超出的记录仍会在每日全量归档中永久保存。",
+    "default": 100
+  },
+  "summary_provider_id": {
+    "description": "总结用小模型ID (Cogito)",
+    "type": "string",
+    "hint": "用于 /cogito 指令的专用模型ID（如 openai_2, ollama_1）。留空则默认使用当前会话的主模型。",
+    "default": ""
+  },
+  "summary_max_retries": {
+    "description": "总结任务重试次数",
+    "type": "int",
+    "hint": "小模型生成总结失败时的重试次数。建议设置为 1-2 次。",
+    "default": 2
+  },
+  "summary_timeout": {
+    "description": "总结任务超时秒数",
+    "type": "int",
+    "hint": "如果小模型在指定时间内未返回总结结果，将中止任务并重试或兜底。",
+    "default": 60
+  },
+  "summary_prompt_template": {
+    "description": "日志总结提示词",
     "type": "text",
-    "hint": "在最终回复中移除这些无意义或不希望出现的词组，每行一个。",
-    "default": "呵呵，\n（……）"
+    "hint": "发送给小模型用于总结日志的提示词模板。{log} 会被替换为实际日志内容。",
+    "default": "请阅读以下机器人的'内心独白(Inner Thought)'日志，用简练、客观的语言总结其核心思考逻辑、情绪状态以及最终的决策意图。\n\n日志内容：\n{log}"
   },
-  "__group_retry_logic__": {
-    "title": "重试逻辑设置",
-    "description": "配置插件在何种情况下、以何种方式进行重试。"
+  "enable_truncation_retry": {
+    "description": "启用截断重试",
+    "type": "bool",
+    "hint": "开启后，检测到回复结尾不是常见标点/字母/数字/文件后缀/网址时自动重试（如 Gemini 截断），建议仅在遇到相关问题时开启。",
+    "default": false
   },
   "max_attempts": {
     "description": "最大重试次数",
@@ -44,67 +48,132 @@
     "default": 3
   },
   "retry_delay": {
-    "description": "基础重试间隔（秒）",
+    "description": "重试间隔（秒）",
     "type": "int",
-    "hint": "每次重试之间的基础等待时间。实际等待时间会随重试次数增加而延长（线性增长）。",
+    "hint": "每次重试之间的等待时间，单位为秒。",
     "default": 2
   },
   "error_keywords": {
     "description": "触发重试的错误关键词",
     "type": "text",
-    "hint": "当LLM的回复或Core抛出的异常中包含这些关键词时，将触发重试。每行一个，不区分大小写。",
-    "default": "exception\nerror\ntimeout"
+    "hint": "当LLM的回复或Core抛出的异常中包含这些关键词时，将触发重试。不区分大小写。",
+    "default": "api 返回的内容为空\n调用失败\n[TRUNCATED_BY_LENGTH]\nupstream error\ndo_request_failed\ninternal server error\n500\n429\nrate limit\ntimeout\ntimed out\nconnection error\nmax retries"
   },
-  "enable_truncation_retry": {
-    "description": "启用截断标记重试",
-    "type": "bool",
-    "hint": "开启后，如果回复内容中包含特定截断标记（如 [TRUNCATED_BY_LENGTH]），将触发重试。注意：这不进行智能判断，只识别标记。",
-    "default": false
+  "retryable_status_codes": {
+    "description": "允许重试的HTTP状态码(每行一个)",
+    "type": "text",
+    "hint": "当错误文本中包含这些状态码时，允许进入重试流程。支持 400/429/502/503/504 等。",
+    "default": "400\n429\n502\n503\n504"
+  },
+  "non_retryable_status_codes": {
+    "description": "禁止重试的HTTP状态码(每行一个)",
+    "type": "text",
+    "hint": "当错误文本中包含这些状态码时，将直接跳过重试。留空表示不限制。",
+    "default": ""
+  },
+  "retry_delay_mode": {
+    "description": "重试间隔模式",
+    "type": "string",
+    "hint": "选择重试间隔的模式。fixed=每次重试间隔固定，exponential=指数退避（每次翻倍，最大30秒）。",
+    "default": "exponential",
+    "enum": [
+      "fixed",
+      "exponential"
+    ]
   },
   "fallback_reply": {
     "description": "重试全部失败时的兜底回复",
     "type": "text",
-    "hint": "当达到最大重试次数后仍然失败时，发送给用户的提示消息。留空则不发送。",
-    "default": "抱歉，服务波动，罗莎暂时无法回应。"
+    "hint": "当达到最大重试次数仍失败时，发送给用户的一段友好提示。留空则不发送消息。",
+    "default": "抱歉，刚才遇到服务波动，我已自动为你重试多次仍未成功。请稍后再试或换个说法。"
+  },
+  "truncation_detection_mode": {
+    "description": "截断检测模式",
+    "type": "string",
+    "hint": "选择截断检测的复杂度。basic=基础字符检测，enhanced=多层智能检测，strict=严格模式。",
+    "default": "enhanced",
+    "enum": [
+      "basic",
+      "enhanced",
+      "strict"
+    ]
+  },
+  "check_structural_integrity": {
+    "description": "启用结构完整性检测",
+    "type": "bool",
+    "hint": "检测括号、引号等结构是否匹配，有助于发现被截断的代码或格式化内容。",
+    "default": true
+  },
+  "check_content_type_specific": {
+    "description": "启用内容类型自适应检测",
+    "type": "bool",
+    "hint": "根据内容类型（代码、列表、表格等）使用不同的截断检测策略。",
+    "default": true
+  },
+  "min_reasonable_length": {
+    "description": "合理回复最小长度",
+    "type": "int",
+    "hint": "短于此长度的回复一般不被认为是截断（除非明显不完整）。",
+    "default": 10
+  },
+  "code_block_detection": {
+    "description": "启用代码块检测",
+    "type": "bool",
+    "hint": "检测Markdown代码块是否完整（```配对）。",
+    "default": true
+  },
+  "quote_matching_detection": {
+    "description": "启用引号匹配检测",
+    "type": "bool",
+    "hint": "检测引号是否配对，有助于发现被截断的字符串。",
+    "default": true
+  },
+  "enable_concurrent_retry": {
+    "description": "启用并发重试",
+    "type": "bool",
+    "hint": "开启后，在第一次重试失败后将使用并发模式进行剩余重试，可显著减少响应延迟但会增加token消耗。",
+    "default": false
+  },
+  "concurrent_retry_threshold": {
+    "description": "并发重试触发阈值",
+    "type": "int",
+    "hint": "在第几次重试失败后启动并发模式。例如设为1表示第1次重试失败后启动并发，设为2表示前2次重试失败后启动并发。设置为0则跳过顺序重试，直接使用并发模式。",
+    "default": 1
+  },
+  "concurrent_retry_count": {
+    "description": "并发请求数量",
+    "type": "int",
+    "hint": "并发模式下同时发起的请求数量。数量越多响应越快但token消耗越大，建议2-3个。",
+    "default": 2
+  },
+  "concurrent_retry_timeout": {
+    "description": "并发重试超时时间(秒)",
+    "type": "int",
+    "hint": "等待并发请求完成的最大时间，超时后返回已获得的最佳结果。",
+    "default": 30
+  },
+  "enable_exponential_growth": {
+    "description": "启用指数增长并发",
+    "type": "bool",
+    "hint": "开启后，后续批次的并发数将指数增长(2,4,8...)，但有上限控制。关闭则保持固定并发数。",
+    "default": true
+  },
+  "max_concurrent_multiplier": {
+    "description": "最大并发倍数",
+    "type": "int",
+    "hint": "指数增长的上限倍数，最大并发数=基础并发数×倍数。建议2-8之间。",
+    "default": 4
+  },
+  "absolute_concurrent_limit": {
+    "description": "绝对并发上限",
+    "type": "int",
+    "hint": "无论如何计算，并发数都不会超过此值。建议5-20之间。",
+    "default": 10
   },
   "exclude_retry_commands": {
     "description": "排除重试的命令列表",
     "type": "text",
-    "hint": "这些命令触发的LLM请求将不会被重试机制处理。每行一个命令，无需命令前缀。",
-    "default": "cogito\nrosaos\nreset\nnew"
-  },
-  "__group_command_features__": {
-    "title": "指令功能设置",
-    "description": "配置 /cogito, /rosaos 等指令相关的功能。"
-  },
-  "history_limit": {
-    "description": "OS 日志保留条数",
-    "type": "int",
-    "hint": "在热数据（JSON文件）中为每个会话保留的最近内心OS记录数量。",
-    "default": 100
-  },
-  "summary_provider_id": {
-    "description": "COGINO分析专用模型ID",
-    "type": "string",
-    "hint": "用于 /cogito 指令的专用模型ID。留空则默认使用当前会话的主模型。",
-    "default": ""
-  },
-  "summary_max_retries": {
-    "description": "COGINO分析重试次数",
-    "type": "int",
-    "hint": "使用专用模型生成分析报告失败时的重试次数。",
-    "default": 2
-  },
-  "summary_timeout": {
-    "description": "COGINO分析超时（秒）",
-    "type": "int",
-    "hint": "如果专用模型在指定时间内未返回分析结果，将中止任务。",
-    "default": 60
-  },
-  "summary_prompt_template": {
-    "description": "COGINO分析提示词模板",
-    "type": "text",
-    "hint": "发送给专用模型用于分析‘内心OS’的提示词模板。{log} 会被替换为实际日志内容。",
-    "default": "请阅读以下机器人的'内心独白(Inner Thought)'日志，用简练、客观的语言总结其核心思考逻辑、情绪状态以及最终的决策意图。\n\n日志内容：\n{log}"
+    "hint": "这些命令触发的 LLM 请求不会被重试机制处理。每行一个命令，支持不同的命令前缀（如 /、&、! 等）。示例：/cogito、&cogito、/rosaos",
+    "default": "/cogito\n/rosaos\nreset\nnew"
   }
 }
