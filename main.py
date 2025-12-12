@@ -540,10 +540,23 @@ class IntelligentRetryWithCoT(Star):
         if not text: return False
         has_start = self.cot_start_tag in text
         has_end = self.cot_end_tag in text
-        has_final = self.FINAL_REPLY_PATTERN.search(text)
-        is_complete = has_start and has_end and has_final
-        if self.force_cot_structure: return not is_complete
-        else: return not (has_start or has_final) and False or not is_complete
+        has_final = bool(self.FINAL_REPLY_PATTERN.search(text))
+        
+        # 完整性定义的基准：三个要素都存在
+        is_perfect = has_start and has_end and has_final
+        # 是否包含任何CoT相关的痕迹
+        has_any_trace = has_start or has_end or has_final
+        
+        if self.force_cot_structure:
+            # 强制模式：必须完美
+            return not is_perfect
+        else:
+            # 非强制模式：
+            # 1. 如果完全没有CoT痕迹 -> 视为合法（普通回复）-> return False
+            if not has_any_trace:
+                return False
+            # 2. 如果有痕迹但结构不完整 -> 视为非法（截断或幻觉）-> return True
+            return not is_perfect
 
     async def _periodic_cleanup_task(self):
         while True:
