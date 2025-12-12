@@ -24,95 +24,114 @@ COLD_ARCHIVE_DIR = Path("data/cot_os_logs/daily_archive")
 HOT_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 COLD_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 
-# --- HTML 渲染模板 (IMAX HD Version) ---
+# --- HTML 渲染模板 (Classicism HD Version) ---
 LOG_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <style>
-        /* 引入系统级字体栈，确保渲染清晰 */
+        /* 古典主义风格 - 高清优化版 */
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif;
-            background-color: #1a1a1a;
+            font-family: 'Noto Serif CJK SC', 'Source Han Serif SC', 'Songti SC', 'SimSun', 'Times New Roman', serif;
+            background-color: #f4f1ea; /* 羊皮纸色调 */
+            color: #2b2b2b; /* 墨色 */
             margin: 0;
-            padding: 0;
+            padding: 60px; /* 增加留白 */
             display: inline-block;
             width: 100%;
+            box-sizing: border-box;
         }
         
         .container {
-            padding: 20px;
-            box-sizing: border-box;
-        }
-
-        .card {
-            background: #252525;
-            border-radius: 16px;
-            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            overflow: hidden;
-            width: 100%; 
-            max-width: 800px;
+            width: 100%;
+            max-width: 1000px; /* 拓宽容器以适配高清渲染 */
             margin: 0 auto;
         }
 
+        .card {
+            background: #fdfbf7;
+            border: 1px solid #dcd6cc;
+            /* 纸张立体感阴影 */
+            box-shadow: 
+                0 2px 5px rgba(0,0,0,0.05),
+                0 20px 40px rgba(0,0,0,0.03),
+                inset 0 0 80px rgba(255,255,255,0.5);
+            padding: 70px;
+            position: relative;
+        }
+        
+        /* 装饰性内边框 */
+        .card::before {
+            content: "";
+            position: absolute;
+            top: 20px; left: 20px; right: 20px; bottom: 20px;
+            border: 2px solid #e8e4db;
+            pointer-events: none;
+        }
+
         .header {
-            background: linear-gradient(135deg, #2c3e50 0%, #000000 100%);
-            padding: 25px 30px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
+            text-align: center;
+            margin-bottom: 50px;
+            border-bottom: 2px solid #2b2b2b;
+            padding-bottom: 25px;
+            position: relative;
+            z-index: 1;
         }
 
         .title {
-            font-size: 26px; 
-            font-weight: 800;
-            color: #ffffff;
-            letter-spacing: 0.5px;
-            -webkit-font-smoothing: antialiased;
-            text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+            font-size: 42px; /* 增大标题字号 */
+            font-weight: 700;
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            margin-bottom: 15px;
+            display: block;
+            color: #1a1a1a;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.1);
         }
 
         .badge {
-            font-size: 16px;
-            font-weight: 600;
-            background: rgba(255, 255, 255, 0.15);
-            padding: 6px 14px;
-            border-radius: 8px;
-            color: #64b5f6;
-            backdrop-filter: blur(4px);
+            font-size: 18px;
+            font-weight: 400;
+            color: #666;
+            font-style: italic;
+            font-family: 'Georgia', serif;
+            background: transparent;
+            padding: 0;
+            border-radius: 0;
+            backdrop-filter: none;
         }
 
         .content {
-            padding: 35px;
-            font-size: 22px; /* 字号大幅提升，保证缩放后清晰 */
-            line-height: 1.6;
-            color: #e0e0e0;
+            font-size: 28px; /* 正文字号显著提升 */
+            line-height: 1.8;
+            color: #333;
             white-space: pre-wrap;
             text-align: justify;
             font-weight: 400;
-            -webkit-font-smoothing: antialiased;
+            margin-bottom: 50px;
+            z-index: 1;
+            position: relative;
         }
 
         .footer {
-            padding: 20px 35px;
-            background: #1e1e1e;
-            border-top: 1px solid rgba(255, 255, 255, 0.05);
-            font-size: 15px;
-            color: #777;
-            text-align: right;
-            font-family: 'JetBrains Mono', Consolas, monospace;
+            text-align: center;
+            font-size: 16px;
+            color: #888;
+            border-top: 1px solid #e8e4db;
+            padding-top: 25px;
+            font-family: 'Georgia', serif;
+            letter-spacing: 2px;
+            text-transform: uppercase;
         }
 
-        strong { color: #ffb74d; font-weight: 700; }
+        strong { color: #8b4513; font-weight: 700; } /* 赭石色强调 */
         em { 
-            color: #4fc3f7; 
-            font-style: normal; 
-            background: rgba(79, 195, 247, 0.1);
-            padding: 2px 6px;
-            border-radius: 4px;
+            color: #556b2f; /* 橄榄绿强调 */
+            font-style: italic;
+            background: transparent;
+            padding: 0;
+            border: none;
         }
     </style>
 </head>
@@ -121,10 +140,10 @@ LOG_TEMPLATE = """
         <div class="card">
             <div class="header">
                 <span class="title">{{ title }}</span>
-                <span class="badge">{{ subtitle }}</span>
+                <span class="badge">&mdash; {{ subtitle }} &mdash;</span>
             </div>
             <div class="content">{{ content }}</div>
-            <div class="footer">COGITO SYSTEM &bull; {{ timestamp }}</div>
+            <div class="footer">COGITO ERGO SUM &bull; {{ timestamp }}</div>
         </div>
     </div>
 </body>
@@ -203,7 +222,16 @@ class IntelligentRetryWithCoT(Star):
     async def _render_and_reply(self, event: AstrMessageEvent, title: str, subtitle: str, content: str):
         try:
             render_data = {"title": title, "subtitle": subtitle, "content": content, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-            img_url = await self.html_render(LOG_TEMPLATE, render_data, options={"viewport": {"width": 640, "height": 800}, "full_page": True})
+            # 高清化参数：增大 Viewport, 启用 deviceScaleFactor (如果支持)
+            img_url = await self.html_render(
+                LOG_TEMPLATE, 
+                render_data, 
+                options={
+                    "viewport": {"width": 1000, "height": 1200}, # 拓宽视口
+                    "deviceScaleFactor": 2, # 2x 缩放采样 (Retina级清晰度)
+                    "full_page": True
+                }
+            )
             if img_url: yield event.image_result(img_url)
             else: yield event.plain_result(f"【渲染失败】\n{content}")
         except Exception: yield event.plain_result(f"【系统异常】\n{content}")
@@ -240,11 +268,48 @@ class IntelligentRetryWithCoT(Star):
                 with open(json_path, 'r', encoding='utf-8') as f: thoughts = json.load(f)
                 target_idx = index - 1
                 if target_idx < 0 or target_idx >= len(thoughts): return None
-                return str(thoughts[target_idx].get('content', ''))
+                content = str(thoughts[target_idx].get('content', ''))
+                if content == "[NO_THOUGHT_FLAG]":
+                    return "罗莎似乎并没有思考喵"
+                return content
             except Exception: return None
         return await asyncio.to_thread(_read_impl)
 
-    # ======================= 功能指令 =======================
+    # --- Helper Methods ---
+
+    def _extract_thought_and_reply(self, text: str) -> tuple[str, str]:
+        """
+        [New Core] 提取 -> 清洗 流水线
+        Returns: (thought_content, reply_content)
+        """
+        if not text: return "", ""
+        thought = ""
+        reply = text
+        
+        parts = self.FINAL_REPLY_PATTERN.split(text, 1)
+        if len(parts) > 1:
+            # 模式 1: 存在明确分割线
+            os_match = self.THOUGHT_TAG_PATTERN.search(parts[0])
+            if os_match:
+                thought = os_match.group('content').strip()
+            else:
+                thought = parts[0].strip()
+            reply = parts[1].strip()
+        else:
+            # 模式 2: 无分割线，尝试提取标签
+            os_match = self.THOUGHT_TAG_PATTERN.search(text)
+            if os_match:
+                thought = os_match.group('content').strip()
+                reply = self.THOUGHT_TAG_PATTERN.sub("", text).strip()
+            else:
+                # 模式 3: 纯回复
+                reply = text.strip()
+
+        # 关键词过滤 (仅针对回复部分)
+        for kw in self.filtered_keywords:
+            reply = reply.replace(kw, "")
+            
+        return thought, reply
     @event_filter.command("rosaos")
     async def get_rosaos_log(self, event: AstrMessageEvent, index: str = "1"):
         """获取内心OS"""
@@ -317,9 +382,12 @@ class IntelligentRetryWithCoT(Star):
 
     @event_filter.on_llm_response(priority=5)
     async def process_and_retry_on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
-        # 1. 优先执行 CoT 裁剪
-        if resp and hasattr(resp, "completion_text") and self.cot_start_tag in (resp.completion_text or ""):
-            await self._split_and_format_cot(resp, event)
+        # 0. 原始数据获取
+        raw_text = getattr(resp, "completion_text", "") or ""
+
+        # 1. 提取与清洗 (Extraction & Cleaning) - 隔离变量
+        # 此时不修改 resp，也不写日志
+        thought_content, reply_content = self._extract_thought_and_reply(raw_text)
 
         # 如果响应直接是空的或者带有错误标记，也视为需要重试
         if getattr(resp, "raw_completion", None):
@@ -329,13 +397,8 @@ class IntelligentRetryWithCoT(Star):
         request_key = self._get_request_key(event)
         if request_key not in self.pending_requests: return
 
-        text = getattr(resp, "completion_text", "") or ""
-
         # ================= [SpectreCore 绿灯通道] =================
-        # 如果检测到静默标记，直接视为成功，跳过所有重试检查
-        # 此时 text 已经被 _split_and_format_cot 清洗过，如果 LLM 输出了 <NO_RESPONSE>
-        # 那么现在的 text 就仅仅包含 <NO_RESPONSE>
-        if "<NO_RESPONSE>" in text:
+        if "<NO_RESPONSE>" in raw_text:
             logger.info(f"[IntelligentRetry] 🟢 检测到 <NO_RESPONSE>，放行静默请求 (Key: {request_key})")
             return
         # ========================================================
@@ -346,14 +409,16 @@ class IntelligentRetryWithCoT(Star):
         raw_str = str(getattr(resp, "raw_completion", "")).lower()
         is_error = "error" in raw_str and ("upstream" in raw_str or "500" in raw_str)
 
-        needs_retry = not text.strip() or self._should_retry_response(resp) or is_trunc or self._is_cot_structure_incomplete(text) or is_error
+        # 校验逻辑必须使用 raw_text (含标签的)
+        needs_retry = not raw_text.strip() or self._should_retry_response(resp) or is_trunc or self._is_cot_structure_incomplete(raw_text) or is_error
         
         if needs_retry:
             logger.info(f"[IntelligentRetry] 🔴 触发重试逻辑 (Key: {request_key})")
             
-            # --- Fix: 先静音当前事件，防止报错发出去 ---
+            # 物理静音防止报错泄漏
             self._silence_event(event)
 
+            # 进入重试循环
             success = await self._execute_retry_sequence(event, request_key)
             if success:
                 res = event.get_result()
@@ -361,8 +426,20 @@ class IntelligentRetryWithCoT(Star):
             else:
                 if self.fallback_reply:
                     self._apply_fallback(event)
-                    # 尝试同步更新 resp 以防万一
                     resp.completion_text = self.fallback_reply
+        else:
+            # 2. 成功提交 (Submission) - 仅在无需重试时执行
+            
+            # A. 应用清洗后的回复 (Commit Reply)
+            if self.display_cot_text and thought_content:
+                resp.completion_text = f"🤔 罗莎思考中：\n{thought_content}\n\n---\n\n{reply_content}"
+            else:
+                resp.completion_text = reply_content
+                
+            # B. 日志缓冲提交 (Commit Log)
+            # 只有确认成功后才写入。若无思考内容，写入哨兵标记
+            log_payload = thought_content if thought_content else "[NO_THOUGHT_FLAG]"
+            await self._async_save_thought(event.unified_msg_origin, log_payload)
         
     @event_filter.on_decorating_result(priority=20)
     async def intercept_api_error(self, event: AstrMessageEvent):
@@ -415,10 +492,9 @@ class IntelligentRetryWithCoT(Star):
         if has_tag:
             for comp in result.chain:
                 if isinstance(comp, Comp.Plain) and comp.text:
-                    temp = LLMResponse()
-                    temp.completion_text = comp.text
-                    await self._split_and_format_cot(temp, event)
-                    comp.text = temp.completion_text
+                    # 使用统一的提取逻辑进行清洗，不记录日志 (防线层)
+                    _, reply = self._extract_thought_and_reply(comp.text)
+                    comp.text = reply
 
     # --- Helper Methods ---
 
@@ -468,26 +544,6 @@ class IntelligentRetryWithCoT(Star):
         is_complete = has_start and has_end and has_final
         if self.force_cot_structure: return not is_complete
         else: return not (has_start or has_final) and False or not is_complete
-
-    async def _split_and_format_cot(self, response: LLMResponse, event: AstrMessageEvent):
-        if not response or not response.completion_text: return
-        text = response.completion_text
-        thought, reply = "", text
-        parts = self.FINAL_REPLY_PATTERN.split(text, 1)
-        if len(parts) > 1:
-            os_match = self.THOUGHT_TAG_PATTERN.search(parts[0])
-            thought = os_match.group('content').strip() if os_match else parts[0].strip()
-            reply = parts[1].strip()
-        else:
-            os_match = self.THOUGHT_TAG_PATTERN.search(text)
-            if os_match:
-                thought = os_match.group('content').strip()
-                reply = self.THOUGHT_TAG_PATTERN.sub("", text).strip()
-        
-        if thought: await self._async_save_thought(event.unified_msg_origin, thought)
-        for kw in self.filtered_keywords: reply = reply.replace(kw, "")
-        if self.display_cot_text and thought: response.completion_text = f"🤔 罗莎思考中：\n{thought}\n\n---\n\n{reply}"
-        else: response.completion_text = reply
 
     async def _periodic_cleanup_task(self):
         while True:
@@ -631,30 +687,38 @@ class IntelligentRetryWithCoT(Star):
             
             # Check 1: Response exists and has content
             if new_response and getattr(new_response, "completion_text", ""):
-                text = new_response.completion_text
+                raw_text = new_response.completion_text
                 
-                # Check 2: Content is NOT an error
-                if not self._should_retry_response(new_response) and not self._is_cot_structure_incomplete(text):
+                # Check 2: Content is NOT an error (Validation using raw_text)
+                if not self._should_retry_response(new_response) and not self._is_cot_structure_incomplete(raw_text):
                     logger.info(f"[IntelligentRetry] ✅ 第 {attempt} 次重试成功")
                                         
-                    # Bug 1.3: Fix history
-                    await self._fix_user_history(event, request_key, bot_reply=text)
+                    # 1. 提取与清洗 (Extraction)
+                    thought, reply = self._extract_thought_and_reply(raw_text)
+
+                    # 2. 补全历史 (Fix History with CLEAN reply)
+                    await self._fix_user_history(event, request_key, bot_reply=reply)
                     
-                    await self._split_and_format_cot(new_response, event)
+                    # 3. 日志缓冲提交 (Commit Log)
+                    log_payload = thought if thought else "[NO_THOUGHT_FLAG]"
+                    await self._async_save_thought(session_id, log_payload)
                     
+                    # 4. 更新结果 (Update Result)
                     final_res = MessageEventResult()
-                    final_res.message(new_response.completion_text)
+                    if self.display_cot_text and thought:
+                        final_res.message(f"🤔 罗莎思考中：\n{thought}\n\n---\n\n{reply}")
+                    else:
+                        final_res.message(reply)
+                        
                     final_res.result_content_type = ResultContentType.LLM_RESULT
                     event.set_result(final_res)
                     return True
                 else:
-                    logger.warning(f"[IntelligentRetry] ⚠️ 第 {attempt} 次重试结果仍无效: {text[:30]}...")
+                    logger.warning(f"[IntelligentRetry] ⚠️ 第 {attempt} 次重试结果仍无效: {raw_text[:30]}...")
             else:
                  logger.warning(f"[IntelligentRetry] ⚠️ 第 {attempt} 次重试返回空 (可能再次超时)")
             
             if attempt < self.max_attempts: 
-                # 指数退避：每次等待时间稍微拉长，给服务器喘息机会
-                # 503 通常是过载，歇得久一点成功率更高
                 real_delay = delay * attempt 
                 await asyncio.sleep(real_delay)
         
