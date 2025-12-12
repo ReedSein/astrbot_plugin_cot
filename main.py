@@ -279,32 +279,56 @@ class IntelligentRetryWithCoT(Star):
 
     def _extract_thought_and_reply(self, text: str) -> tuple[str, str]:
         """
-        [New Core] 提取 -> 清洗 流水线
+        [New Core] 提取 -> 清洗 流水线 (Greedy & Inclusive)
+        策略：最外层锚点锁定，吞噬中间所有干扰
         Returns: (thought_content, reply_content)
         """
         if not text: return "", ""
+        
+        start_tag = self.cot_start_tag
+        end_tag = self.cot_end_tag
+        
         thought = ""
         reply = text
         
-        parts = self.FINAL_REPLY_PATTERN.split(text, 1)
+        # 1. 定位最外层标签 (Greedy Search)
+        # 使用 find 找第一个开始，rfind 找最后一个结束
+        start_idx = text.find(start_tag)
+        
+        if start_idx != -1:
+            end_idx = text.rfind(end_tag)
+            
+            if end_idx != -1 and end_idx > start_idx:
+                # Case A: 完整闭合 (吞噬中间所有内容，包括嵌套的标签)
+                thought = text[start_idx + len(start_tag) : end_idx]
+                # 拼接头部和尾部作为回复 (通常头部是空的，但防止有前缀)
+                reply = text[:start_idx] + text[end_idx + len(end_tag):]
+            else:
+                # Case B: 只有开始，没结束 (截断保护)
+                # 宁可多切，不可泄露 -> 视为全部是思考，正文置空
+                thought = text[start_idx + len(start_tag):]
+                reply = text[:start_idx]
+        
+        # 2. 清洗回复中的分割线 (Clean Separator)
+        # 无论是否提取了标签，回复中仍可能残留 "最终回复：" (例如在标签外部)
+        # 或者在没标签的情况下，利用分割线做回退提取
+        parts = self.FINAL_REPLY_PATTERN.split(reply, 1)
         if len(parts) > 1:
-            # 模式 1: 存在明确分割线
-            os_match = self.THOUGHT_TAG_PATTERN.search(parts[0])
-            if os_match:
-                thought = os_match.group('content').strip()
-            else:
-                thought = parts[0].strip()
-            reply = parts[1].strip()
-        else:
-            # 模式 2: 无分割线，尝试提取标签
-            os_match = self.THOUGHT_TAG_PATTERN.search(text)
-            if os_match:
-                thought = os_match.group('content').strip()
-                reply = self.THOUGHT_TAG_PATTERN.sub("", text).strip()
-            else:
-                # 模式 3: 纯回复
-                reply = text.strip()
+            # 如果存在分割线，parts[1] 肯定是正文
+            # parts[0] 可能是:
+            #   a) 垃圾字符 (如果刚才已经通过标签提取了 thought)
+            #   b) 真正的 thought (如果刚才没标签)
+            
+            if not thought and start_idx == -1:
+                # 仅在未通过标签提取时，才采纳分割线前的部分
+                thought = parts[0]
+            
+            reply = parts[1]
 
+        # 3. 最终清洗
+        thought = thought.strip()
+        reply = reply.strip()
+        
         # 关键词过滤 (仅针对回复部分)
         for kw in self.filtered_keywords:
             reply = reply.replace(kw, "")
