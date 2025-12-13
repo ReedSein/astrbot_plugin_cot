@@ -2,7 +2,7 @@
   "force_cot_structure": {
     "description": "强制CoT结构 (核心功能)",
     "type": "bool",
-    "hint": "开启后，任何不包含<罗莎内心OS>和'最终的罗莎回复'结构的LLM响应都将被视为无效并触发重试。强烈建议为罗莎人格保持开启。",
+    "hint": "开启后，如果模型回复中不包含'最终的罗莎回复'锚点，将视为无效并触发重试。",
     "default": true
   },
   "display_cot_text": {
@@ -11,22 +11,10 @@
     "hint": "开启后，Bot回复中将包含'🤔 罗莎思考中：...'的思维链内容。关闭则只显示最终回复。",
     "default": false
   },
-  "cot_start_tag": {
-    "description": "思维链开始标签",
-    "type": "string",
-    "hint": "用于识别思维链开始的标签，如 <罗莎内心OS>。",
-    "default": "<罗莎内心OS>"
-  },
-  "cot_end_tag": {
-    "description": "思维链结束标签",
-    "type": "string",
-    "hint": "用于识别思维链结束的标签，如 </罗莎内心OS>。",
-    "default": "</罗莎内心OS>"
-  },
   "final_reply_pattern": {
     "description": "最终回复分隔正则",
     "type": "string",
-    "hint": "用于分割思维链和最终回复的正则表达式。",
+    "hint": "用于分割思维链和最终回复的正则表达式锚点。锚点前为思维链，锚点后为回复。",
     "default": "最终的罗莎回复[:：]?\\s*"
   },
   "filtered_keywords": {
