@@ -279,57 +279,35 @@ class IntelligentRetryWithCoT(Star):
 
     def _extract_thought_and_reply(self, text: str) -> tuple[str, str]:
         """
-        [New Core] 提取 -> 清洗 流水线 (Greedy & Inclusive)
-        策略：最外层锚点锁定，吞噬中间所有干扰
-        Returns: (thought_content, reply_content)
+        [New Core] 锚点分割提取 (Anchor Splitting) - 贪婪模式
+        策略：利用正则贪婪匹配定位【最后一个】锚点。
+        锚点前 = 思考 (CoT)
+        锚点后 = 回复 (Reply)
         """
         if not text: return "", ""
-        
-        start_tag = self.cot_start_tag
-        end_tag = self.cot_end_tag
-        
-        thought = ""
-        reply = text
-        
-        # 1. 定位最外层标签 (Greedy Search)
-        # 使用 find 找第一个开始，rfind 找最后一个结束
-        start_idx = text.find(start_tag)
-        
-        if start_idx != -1:
-            end_idx = text.rfind(end_tag)
-            
-            if end_idx != -1 and end_idx > start_idx:
-                # Case A: 完整闭合 (吞噬中间所有内容，包括嵌套的标签)
-                thought = text[start_idx + len(start_tag) : end_idx]
-                # 拼接头部和尾部作为回复 (通常头部是空的，但防止有前缀)
-                reply = text[:start_idx] + text[end_idx + len(end_tag):]
-            else:
-                # Case B: 只有开始，没结束 (截断保护)
-                # 宁可多切，不可泄露 -> 视为全部是思考，正文置空
-                thought = text[start_idx + len(start_tag):]
-                reply = text[:start_idx]
-        
-        # 2. 清洗回复中的分割线 (Clean Separator)
-        # 无论是否提取了标签，回复中仍可能残留 "最终回复：" (例如在标签外部)
-        # 或者在没标签的情况下，利用分割线做回退提取
-        parts = self.FINAL_REPLY_PATTERN.split(reply, 1)
-        if len(parts) > 1:
-            # 如果存在分割线，parts[1] 肯定是正文
-            # parts[0] 可能是:
-            #   a) 垃圾字符 (如果刚才已经通过标签提取了 thought)
-            #   b) 真正的 thought (如果刚才没标签)
-            
-            if not thought and start_idx == -1:
-                # 仅在未通过标签提取时，才采纳分割线前的部分
-                thought = parts[0]
-            
-            reply = parts[1]
 
-        # 3. 最终清洗
-        thought = thought.strip()
-        reply = reply.strip()
+        # 1. 构建贪婪分割正则
+        # (?s) 开启 DOTALL 模式，让 . 匹配换行符
+        # (.*) 贪婪捕获组1：吞噬尽可能多的字符 -> 只要后面还能匹配上锚点，这里就会一直吞，直到最后一个锚点前
+        # (...) 捕获组2：锚点本身 (self.final_reply_pattern_str)
+        # (.*) 捕获组3：锚点后的剩余内容 (正文)
+        # 注意：锚点 pattern 可能包含分组，因此回复一定是 groups() 的最后一个
+        pattern = f"(?s)(.*)({self.final_reply_pattern_str})(.*)"
         
-        # 关键词过滤 (仅针对回复部分)
+        match = re.match(pattern, text)
+        
+        if match:
+            # 匹配成功：找到了至少一个锚点 (正则特性保证了是最后一个)
+            thought = match.group(1).strip()
+            # 获取最后一个捕获组作为回复 (即使 anchor 内部有捕获组，最后一个也是我们的 (.*))
+            reply = match.groups()[-1].strip()
+        else:
+            # 匹配失败：全文无锚点
+            # 兜底策略：视为全是回复 (防止误吞正文)
+            thought = ""
+            reply = text.strip()
+
+        # 2. 关键词过滤 (仅针对回复部分)
         for kw in self.filtered_keywords:
             reply = reply.replace(kw, "")
             
@@ -562,25 +540,17 @@ class IntelligentRetryWithCoT(Star):
 
     def _is_cot_structure_incomplete(self, text: str) -> bool:
         if not text: return False
-        has_start = self.cot_start_tag in text
-        has_end = self.cot_end_tag in text
-        has_final = bool(self.FINAL_REPLY_PATTERN.search(text))
         
-        # 完整性定义的基准：三个要素都存在
-        is_perfect = has_start and has_end and has_final
-        # 是否包含任何CoT相关的痕迹
-        has_any_trace = has_start or has_end or has_final
+        # 新策略：只检查锚点 (final_reply_pattern) 是否存在
+        has_anchor = bool(self.FINAL_REPLY_PATTERN.search(text))
         
         if self.force_cot_structure:
-            # 强制模式：必须完美
-            return not is_perfect
+            # 强制模式：如果锚点不存在，则视为结构不完整 (需要重试)
+            return not has_anchor
         else:
-            # 非强制模式：
-            # 1. 如果完全没有CoT痕迹 -> 视为合法（普通回复）-> return False
-            if not has_any_trace:
-                return False
-            # 2. 如果有痕迹但结构不完整 -> 视为非法（截断或幻觉）-> return True
-            return not is_perfect
+            # 非强制模式：不再根据CoT结构完整性进行重试拦截
+            # 此时缺少锚点被视为普通的无CoT回复，有锚点则正常提取
+            return False
 
     async def _periodic_cleanup_task(self):
         while True:
