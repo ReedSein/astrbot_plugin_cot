@@ -361,39 +361,38 @@ class IntelligentRetryWithCoT(Star):
             async for msg in self._render_and_reply(event, "COGITO 分析报告", f"Index {idx}", final_summary): yield msg
         else: yield event.plain_result("⚠️ 分析超时。")
 
-    # ======================= 核心重试逻辑 =======================
-
     def _validate_response(self, text: str) -> bool:
         """
-        [Security Check] 响应安检逻辑
-        Returns: True if valid (pass), False if invalid (block & retry)
+        [Security Check] 响应安检逻辑 (有罪推定版)
+        逻辑真值表：
+        1. 有锚点 -> 放行 (无论有无标签，因为提取器能处理)
+        2. 无锚点 & 有标签 -> 拦截 (格式错误，防泄露)
+        3. 无锚点 & 无标签 -> 放行 (纯净回复，除非强制开启)
         """
         if not text: return False
         
-        has_tag = self.cot_start_tag in text
-        
-        # 检查是否包含任意锚点
+        # 1. 锚点检测 (A/B 方案)
         has_primary = bool(self.FINAL_REPLY_PATTERN.search(text))
         has_fallback = bool(re.search(r"\[TEXTE\s+FINAL\]\s*[:：]", text, re.DOTALL))
-        has_any_anchor = has_primary or has_fallback
+        has_anchor = has_primary or has_fallback
         
-        # 1. 触发重试 (Block & Retry)
-        # IF (检测到 <罗莎内心OS> 标签) AND (既没有“中文锚点” 也没有 “英文锚点”)
-        if has_tag and not has_any_anchor:
-            return False # Invalid
-            
-        # 2. 放行 (Pass)
-        # IF (既没有 <罗莎内心OS> 标签) AND (既没有“中文锚点” 也没有 “英文锚点”)
-        if not has_tag and not has_any_anchor:
-            # 除非配置强制要求结构，否则放行
-            if self.force_cot_structure:
-                return False
-            return True # Valid
-            
-        # 3. 正常处理 (Process)
-        # IF (找到任意锚点) -> Valid
-        if has_any_anchor:
+        if has_anchor:
+            # 场景 A & D: 只要有锚点，就信任提取器的分割能力
             return True
+            
+        # 2. 标签检测 (扩充检测范围，Start/End 只要沾边就算)
+        has_tag = (self.cot_start_tag in text) or (self.cot_end_tag in text)
+        
+        if has_tag:
+            # 场景 B: 有标签但没锚点 -> 绝对的泄露风险 -> 必须重试
+            logger.warning(f"[IntelligentRetry] 🛡️ 触发防泄露机制：检测到 '{self.cot_start_tag}' 但缺失锚点。")
+            return False
+            
+        # 3. 纯净检测
+        # 场景 C: 既没锚点也没标签
+        if self.force_cot_structure:
+            # 强制模式下，没锚点就不行
+            return False
             
         return True
 
