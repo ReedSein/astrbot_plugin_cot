@@ -279,39 +279,58 @@ class IntelligentRetryWithCoT(Star):
 
     def _extract_thought_and_reply(self, text: str) -> tuple[str, str]:
         """
-        [New Core] 锚点分割提取 (Anchor Splitting) - 贪婪模式
-        策略：利用正则贪婪匹配定位【最后一个】锚点。
-        锚点前 = 思考 (CoT)
-        锚点后 = 回复 (Reply)
+        [New Core] 双重锚点分割提取 (Dual Anchor Splitting)
+        策略：优先级 A -> 优先级 B -> 兜底
+        利用贪婪正则 (?s)(.*)(ANCHOR)(.*) 定位【最后一个】锚点。
         """
         if not text: return "", ""
 
-        # 1. 构建贪婪分割正则
-        # (?s) 开启 DOTALL 模式，让 . 匹配换行符
-        # (.*) 贪婪捕获组1：吞噬尽可能多的字符 -> 只要后面还能匹配上锚点，这里就会一直吞，直到最后一个锚点前
-        # (...) 捕获组2：锚点本身 (self.final_reply_pattern_str)
-        # (.*) 捕获组3：锚点后的剩余内容 (正文)
-        # 注意：锚点 pattern 可能包含分组，因此回复一定是 groups() 的最后一个
-        pattern = f"(?s)(.*)({self.final_reply_pattern_str})(.*)"
-        
-        match = re.match(pattern, text)
-        
-        if match:
-            # 匹配成功：找到了至少一个锚点 (正则特性保证了是最后一个)
-            thought = match.group(1).strip()
-            # 获取最后一个捕获组作为回复 (即使 anchor 内部有捕获组，最后一个也是我们的 (.*))
-            reply = match.groups()[-1].strip()
-        else:
-            # 匹配失败：全文无锚点
-            # 兜底策略：视为全是回复 (防止误吞正文)
-            thought = ""
-            reply = text.strip()
+        # 定义提取逻辑的内部函数
+        def _try_extract(pattern_str):
+            # 构造贪婪正则: 
+            # 1. (?s) 开启换行匹配
+            # 2. (.*) 贪婪捕获思维链 (直到最后一个锚点)
+            # 3. (pattern_str) 捕获锚点本身
+            # 4. (.*) 捕获锚点后的回复
+            full_pattern = f"(?s)(.*)({pattern_str})(.*)"
+            match = re.match(full_pattern, text)
+            if match:
+                # 成功提取
+                th = match.group(1).strip()
+                # 确保获取最后一个捕获组作为回复 (兼容 pattern_str 内部含分组的情况)
+                rp = match.groups()[-1].strip()
+                return True, th, rp
+            return False, "", ""
 
-        # 2. 关键词过滤 (仅针对回复部分)
+        # --- 优先级 A: 配置的主锚点 (默认: 最终的罗莎回复：) ---
+        success, thought, reply = _try_extract(self.final_reply_pattern_str)
+        if success:
+            return self._finalize_result(thought, reply)
+
+        # --- 优先级 B: 备用锚点 [TEXTE FINAL] : ---
+        # 正则说明: \[TEXTE\s+FINAL\] 匹配 [TEXTE FINAL]
+        # \s*[:：] 匹配冒号前可能有空格，兼容中英文冒号
+        fallback_pattern = r"\[TEXTE\s+FINAL\]\s*[:：]"
+        success, thought, reply = _try_extract(fallback_pattern)
+        if success:
+            return self._finalize_result(thought, reply)
+
+        # --- 兜底 C: 无锚点 ---
+        # 视为全都是回复，无思维链
+        return "", self._finalize_reply_only(text)
+
+    def _finalize_result(self, thought: str, reply: str) -> tuple[str, str]:
+        """统一后的清洗逻辑"""
         for kw in self.filtered_keywords:
             reply = reply.replace(kw, "")
-            
         return thought, reply
+
+    def _finalize_reply_only(self, text: str) -> str:
+        """仅清洗回复"""
+        reply = text.strip()
+        for kw in self.filtered_keywords:
+            reply = reply.replace(kw, "")
+        return reply
     @event_filter.command("rosaos")
     async def get_rosaos_log(self, event: AstrMessageEvent, index: str = "1"):
         """获取内心OS"""
