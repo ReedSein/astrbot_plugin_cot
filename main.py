@@ -363,6 +363,40 @@ class IntelligentRetryWithCoT(Star):
 
     # ======================= 核心重试逻辑 =======================
 
+    def _validate_response(self, text: str) -> bool:
+        """
+        [Security Check] 响应安检逻辑
+        Returns: True if valid (pass), False if invalid (block & retry)
+        """
+        if not text: return False
+        
+        has_tag = self.cot_start_tag in text
+        
+        # 检查是否包含任意锚点
+        has_primary = bool(self.FINAL_REPLY_PATTERN.search(text))
+        has_fallback = bool(re.search(r"\[TEXTE\s+FINAL\]\s*[:：]", text, re.DOTALL))
+        has_any_anchor = has_primary or has_fallback
+        
+        # 1. 触发重试 (Block & Retry)
+        # IF (检测到 <罗莎内心OS> 标签) AND (既没有“中文锚点” 也没有 “英文锚点”)
+        if has_tag and not has_any_anchor:
+            return False # Invalid
+            
+        # 2. 放行 (Pass)
+        # IF (既没有 <罗莎内心OS> 标签) AND (既没有“中文锚点” 也没有 “英文锚点”)
+        if not has_tag and not has_any_anchor:
+            # 除非配置强制要求结构，否则放行
+            if self.force_cot_structure:
+                return False
+            return True # Valid
+            
+        # 3. 正常处理 (Process)
+        # IF (找到任意锚点) -> Valid
+        if has_any_anchor:
+            return True
+            
+        return True
+
     @event_filter.on_llm_request(priority=70)
     async def store_llm_request(self, event: AstrMessageEvent, req):
         """记录请求上下文"""
@@ -401,6 +435,40 @@ class IntelligentRetryWithCoT(Star):
         }
         self.pending_requests[request_key] = stored_params
 
+    def _validate_response(self, text: str) -> bool:
+        """
+        [Security Check] 响应安检逻辑
+        Returns: True if valid (pass), False if invalid (block & retry)
+        """
+        if not text: return False
+        
+        has_tag = self.cot_start_tag in text
+        
+        # 检查是否包含任意锚点
+        has_primary = bool(self.FINAL_REPLY_PATTERN.search(text))
+        has_fallback = bool(re.search(r"\[TEXTE\s+FINAL\]\s*[:：]", text, re.DOTALL))
+        has_any_anchor = has_primary or has_fallback
+        
+        # 1. 触发重试 (Block & Retry)
+        # IF (检测到 <罗莎内心OS> 标签) AND (既没有“中文锚点” 也没有 “英文锚点”)
+        if has_tag and not has_any_anchor:
+            return False # Invalid
+            
+        # 2. 放行 (Pass)
+        # IF (既没有 <罗莎内心OS> 标签) AND (既没有“中文锚点” 也没有 “英文锚点”)
+        if not has_tag and not has_any_anchor:
+            # 除非配置强制要求结构，否则放行
+            if self.force_cot_structure:
+                return False
+            return True # Valid
+            
+        # 3. 正常处理 (Process)
+        # IF (找到任意锚点) -> Valid
+        if has_any_anchor:
+            return True
+            
+        return True
+
     @event_filter.on_llm_response(priority=5)
     async def process_and_retry_on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
         # 0. 原始数据获取
@@ -431,7 +499,10 @@ class IntelligentRetryWithCoT(Star):
         is_error = "error" in raw_str and ("upstream" in raw_str or "500" in raw_str)
 
         # 校验逻辑必须使用 raw_text (含标签的)
-        needs_retry = not raw_text.strip() or self._should_retry_response(resp) or is_trunc or self._is_cot_structure_incomplete(raw_text) or is_error
+        # 使用新的 _validate_response 逻辑 (返回 True 表示合法，False 表示需要重试)
+        is_valid_structure = self._validate_response(raw_text)
+        
+        needs_retry = not raw_text.strip() or self._should_retry_response(resp) or is_trunc or not is_valid_structure or is_error
         
         if needs_retry:
             logger.info(f"[IntelligentRetry] 🔴 触发重试逻辑 (Key: {request_key})")
@@ -556,20 +627,6 @@ class IntelligentRetryWithCoT(Star):
         text = text_or_response.completion_text if hasattr(text_or_response, "completion_text") else text_or_response
         if hasattr(text_or_response, "completion_text") and "[TRUNCATED_BY_LENGTH]" in (text or ""): return True
         return False
-
-    def _is_cot_structure_incomplete(self, text: str) -> bool:
-        if not text: return False
-        
-        # 新策略：只检查锚点 (final_reply_pattern) 是否存在
-        has_anchor = bool(self.FINAL_REPLY_PATTERN.search(text))
-        
-        if self.force_cot_structure:
-            # 强制模式：如果锚点不存在，则视为结构不完整 (需要重试)
-            return not has_anchor
-        else:
-            # 非强制模式：不再根据CoT结构完整性进行重试拦截
-            # 此时缺少锚点被视为普通的无CoT回复，有锚点则正常提取
-            return False
 
     async def _periodic_cleanup_task(self):
         while True:
@@ -716,7 +773,10 @@ class IntelligentRetryWithCoT(Star):
                 raw_text = new_response.completion_text
                 
                 # Check 2: Content is NOT an error (Validation using raw_text)
-                if not self._should_retry_response(new_response) and not self._is_cot_structure_incomplete(raw_text):
+                # 使用新的 _validate_response 逻辑
+                is_valid = self._validate_response(raw_text)
+                
+                if not self._should_retry_response(new_response) and is_valid:
                     logger.info(f"[IntelligentRetry] ✅ 第 {attempt} 次重试成功")
                                         
                     # 1. 提取与清洗 (Extraction)
