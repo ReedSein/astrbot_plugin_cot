@@ -277,61 +277,39 @@ class IntelligentRetryWithCoT(Star):
 
     # --- Helper Methods ---
 
-    def _extract_thought_and_reply(self, text: str) -> tuple[str, str]:
+    def _safe_process_response(self, text: str) -> tuple[Optional[str], str]:
         """
-        [New Core] 双重锚点分割提取 (Dual Anchor Splitting)
-        策略：优先级 A -> 优先级 B -> 优先级 C -> 兜底
-        利用贪婪正则 (?s)(.*)(ANCHOR)(.*) 定位【最后一个】锚点。
+        [New Core] 安全响应处理
+        1. 贪婪匹配锚点 "最终的罗莎回复："
+        2. 零信任拦截：有标签无锚点 -> 抛出异常
+        3. 放行：无标签无锚点 -> 返回 (None, text)
         """
-        if not text: return "", ""
+        if not text: return None, ""
 
-        # 定义提取逻辑的内部函数
-        def _try_extract(pattern_str):
-            # 构造贪婪正则: 
-            # 1. (?s) 开启换行匹配
-            # 2. (.*) 贪婪捕获思维链 (直到最后一个锚点)
-            # 3. (pattern_str) 捕获锚点本身
-            # 4. (.*) 捕获锚点后的回复
-            full_pattern = f"(?s)(.*)({pattern_str})(.*)"
-            match = re.match(full_pattern, text)
-            if match:
-                # 成功提取
-                th = match.group(1).strip()
-                # 确保获取最后一个捕获组作为回复 (兼容 pattern_str 内部含分组的情况)
-                rp = match.groups()[-1].strip()
-                return True, th, rp
-            return False, "", ""
+        # 1. 构造贪婪正则 (严格匹配 "最终的罗莎回复：" 或 "最终的罗莎回复:")
+        # (?s) dot matches newline
+        # (.*) Group 1: Thought (Greedy)
+        # (最终的罗莎回复\s*[：:]) Group 2: Anchor
+        # (.*) Group 3: Reply
+        pattern = re.compile(r"(?s)(.*)(最终的罗莎回复\s*[：:])(.*)")
+        
+        match = pattern.match(text)
 
-        # --- 优先级 A: 配置的主锚点 (默认: 最终的罗莎回复：) ---
-        success, thought, reply = _try_extract(self.final_reply_pattern_str)
-        if success:
-            return self._finalize_result(thought, reply)
-
-        # --- 优先级 B: 备用锚点 [TEXTE FINAL] : ---
-        # 正则说明: \[TEXTE\s+FINAL\] 匹配 [TEXTE FINAL]
-        # \s*[:：] 匹配冒号前可能有空格，兼容中英文冒号
-        fallback_pattern = r"\[TEXTE\s+FINAL\]\s*[:：]"
-        success, thought, reply = _try_extract(fallback_pattern)
-        if success:
-            return self._finalize_result(thought, reply)
-
-        # --- 优先级 C: 只有标签 (针对 Tool Call 或 截断情况) ---
-        if self.cot_start_tag in text and self.cot_end_tag in text:
-             match = self.THOUGHT_TAG_PATTERN.search(text)
-             if match:
-                 thought = match.group('content').strip()
-                 reply = text.replace(match.group(0), "").strip()
-                 return self._finalize_result(thought, reply)
-
-        # --- 兜底 D: 无锚点 ---
-        # 视为全都是回复，无思维链
-        return "", self._finalize_reply_only(text)
-
-    def _finalize_result(self, thought: str, reply: str) -> tuple[str, str]:
-        """统一后的清洗逻辑"""
-        for kw in self.filtered_keywords:
-            reply = reply.replace(kw, "")
-        return thought, reply
+        if match:
+            # 命中锚点 -> 提取思维与回复
+            thought = match.group(1).strip()
+            reply = match.group(3).strip()
+            return thought, self._finalize_reply_only(reply) # Clean keywords from reply
+        
+        # 未命中锚点 -> 进入安全检查
+        has_tag = self.cot_start_tag in text
+        
+        if has_tag:
+            # 有标签但无锚点 -> 格式错误/潜在泄露 -> 零信任拦截
+            raise ValueError(f"检测到 '{self.cot_start_tag}' 但缺失锚点，触发零信任拦截。")
+            
+        # 既无标签也无锚点 -> 放行
+        return None, self._finalize_reply_only(text)
 
     def _finalize_reply_only(self, text: str) -> str:
         """仅清洗回复"""
@@ -369,40 +347,7 @@ class IntelligentRetryWithCoT(Star):
             async for msg in self._render_and_reply(event, "COGITO 分析报告", f"Index {idx}", final_summary): yield msg
         else: yield event.plain_result("⚠️ 分析超时。")
 
-    def _validate_response(self, text: str) -> bool:
-        """
-        [Security Check] 响应安检逻辑 (有罪推定版)
-        逻辑真值表：
-        1. 有锚点 -> 放行 (无论有无标签，因为提取器能处理)
-        2. 无锚点 & 有标签 -> 拦截 (格式错误，防泄露)
-        3. 无锚点 & 无标签 -> 放行 (纯净回复，除非强制开启)
-        """
-        if not text: return False
-        
-        # 1. 锚点检测 (A/B 方案)
-        has_primary = bool(self.FINAL_REPLY_PATTERN.search(text))
-        has_fallback = bool(re.search(r"\[TEXTE\s+FINAL\]\s*[:：]", text, re.DOTALL))
-        has_anchor = has_primary or has_fallback
-        
-        if has_anchor:
-            # 场景 A & D: 只要有锚点，就信任提取器的分割能力
-            return True
-            
-        # 2. 标签检测 (扩充检测范围，Start/End 只要沾边就算)
-        has_tag = (self.cot_start_tag in text) or (self.cot_end_tag in text)
-        
-        if has_tag:
-            # 场景 B: 有标签但没锚点 -> 绝对的泄露风险 -> 必须重试
-            logger.warning(f"[IntelligentRetry] 🛡️ 触发防泄露机制：检测到 '{self.cot_start_tag}' 但缺失锚点。")
-            return False
-            
-        # 3. 纯净检测
-        # 场景 C: 既没锚点也没标签
-        if self.force_cot_structure:
-            # 强制模式下，没锚点就不行
-            return False
-            
-        return True
+
 
     @event_filter.on_llm_request(priority=70)
     async def store_llm_request(self, event: AstrMessageEvent, req):
@@ -449,9 +394,16 @@ class IntelligentRetryWithCoT(Star):
         # 0. 原始数据获取
         raw_text = getattr(resp, "completion_text", "") or ""
 
-        # 1. 提取与清洗 (Extraction & Cleaning) - 隔离变量
+        # 1. 安全处理 (Safe Processing)
         # 此时不修改 resp，也不写日志
-        thought_content, reply_content = self._extract_thought_and_reply(raw_text)
+        try:
+            thought_content, reply_content = self._safe_process_response(raw_text)
+            is_valid_structure = True
+        except ValueError as e:
+            # 捕获到安全异常
+            logger.warning(f"[IntelligentRetry] 🛡️ {e}")
+            thought_content, reply_content = None, ""
+            is_valid_structure = False
 
         # 如果响应直接是空的或者带有错误标记，也视为需要重试
         is_tool_call = False
@@ -474,10 +426,6 @@ class IntelligentRetryWithCoT(Star):
         # [Check] 检查原始响应是否包含报错
         raw_str = str(getattr(resp, "raw_completion", "")).lower()
         is_error = "error" in raw_str and ("upstream" in raw_str or "500" in raw_str)
-
-        # 校验逻辑必须使用 raw_text (含标签的)
-        # 使用新的 _validate_response 逻辑 (返回 True 表示合法，False 表示需要重试)
-        is_valid_structure = self._validate_response(raw_text)
         
         needs_retry = not is_tool_call and (not raw_text.strip() or self._should_retry_response(resp) or is_trunc or not is_valid_structure or is_error)
         
@@ -562,8 +510,11 @@ class IntelligentRetryWithCoT(Star):
             for comp in result.chain:
                 if isinstance(comp, Comp.Plain) and comp.text:
                     # 使用统一的提取逻辑进行清洗，不记录日志 (防线层)
-                    _, reply = self._extract_thought_and_reply(comp.text)
-                    comp.text = reply
+                    try:
+                        _, reply = self._safe_process_response(comp.text)
+                        comp.text = reply
+                    except ValueError:
+                         comp.text = self.fallback_reply
 
     # --- Helper Methods ---
 
@@ -750,14 +701,17 @@ class IntelligentRetryWithCoT(Star):
                 raw_text = new_response.completion_text
                 
                 # Check 2: Content is NOT an error (Validation using raw_text)
-                # 使用新的 _validate_response 逻辑
-                is_valid = self._validate_response(raw_text)
+                try:
+                    thought, reply = self._safe_process_response(raw_text)
+                    is_valid = True
+                except ValueError:
+                    is_valid = False
                 
                 if not self._should_retry_response(new_response) and is_valid:
                     logger.info(f"[IntelligentRetry] ✅ 第 {attempt} 次重试成功")
                                         
-                    # 1. 提取与清洗 (Extraction)
-                    thought, reply = self._extract_thought_and_reply(raw_text)
+                    # 1. 提取与清洗 (Extraction) - 已在上方完成
+                    # thought, reply = self._extract_thought_and_reply(raw_text)
 
                     # 2. 补全历史 (Fix History with CLEAN reply)
                     await self._fix_user_history(event, request_key, bot_reply=reply)
