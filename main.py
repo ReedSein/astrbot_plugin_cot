@@ -168,11 +168,28 @@ class IntelligentRetryWithCoT(Star):
         self._parse_config(config)
         
         # --- 罗莎配置 ---
-        self.cot_start_tag = config.get("cot_start_tag", "<罗莎内心OS>")
-        self.cot_end_tag = config.get("cot_end_tag", "</罗莎内心OS>")
+        self.cot_start_tag = config.get("cot_start_tag", "<ROSAOS>")
+        self.cot_end_tag = config.get("cot_end_tag", "</ROSAOS>")
         self.final_reply_pattern_str = config.get("final_reply_pattern", r"最终的罗莎回复[:：]?\s*")
         
         self.FINAL_REPLY_PATTERN = re.compile(self.final_reply_pattern_str, re.IGNORECASE)
+        
+        # 构造灵活的标签检测正则，兼容中英文括号
+        # 匹配规则：[<＜《(（] ROSAOS [>＞》)）]
+        # 提取标签核心词（去掉尖括号部分）
+        start_core = self.cot_start_tag.strip("<>＜＞《》()（）")
+        end_core = self.cot_end_tag.strip("</>＜＞《》()（）")
+        
+        # 构造正则：允许前后括号是任意常见的中英文括号
+        brackets = r"[<＜《\(\[（]"
+        close_brackets = r"[>＞》\)\]）]"
+        
+        self.COT_TAG_DETECTOR = re.compile(
+            f"({brackets}/?{re.escape(start_core)}{close_brackets})|"
+            f"({brackets}/?{re.escape(end_core)}{close_brackets})", 
+            re.IGNORECASE
+        )
+        
         escaped_start = re.escape(self.cot_start_tag)
         escaped_end = re.escape(self.cot_end_tag)
         self.THOUGHT_TAG_PATTERN = re.compile(f'{escaped_start}(?P<content>.*?){escaped_end}', re.DOTALL)
@@ -302,11 +319,12 @@ class IntelligentRetryWithCoT(Star):
             return thought, self._finalize_reply_only(reply) # Clean keywords from reply
         
         # 未命中锚点 -> 进入安全检查
-        has_tag = (self.cot_start_tag in text) or (self.cot_end_tag in text)
+        # 使用正则进行模糊匹配，兼容中英文括号
+        has_tag = bool(self.COT_TAG_DETECTOR.search(text))
         
         if has_tag:
             # 有标签但无锚点 -> 格式错误/潜在泄露 -> 零信任拦截
-            raise ValueError(f"检测到思维链标签但缺失锚点，触发零信任拦截。")
+            raise ValueError(f"检测到思维链标签(或其变体)但缺失锚点，触发零信任拦截。")
             
         # 既无标签也无锚点 -> 放行
         return None, self._finalize_reply_only(text)
@@ -506,7 +524,9 @@ class IntelligentRetryWithCoT(Star):
         
         # 获取全文进行判断，避免组件碎片化处理导致的部分替换、部分泄露
         plain_text = result.get_plain_text()
-        has_tag = (self.cot_start_tag in plain_text) or (self.cot_end_tag in plain_text)
+        
+        # 使用正则进行模糊匹配，兼容中英文括号
+        has_tag = bool(self.COT_TAG_DETECTOR.search(plain_text))
         
         if has_tag:
             try:
