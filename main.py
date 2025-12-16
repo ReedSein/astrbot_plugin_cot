@@ -302,11 +302,11 @@ class IntelligentRetryWithCoT(Star):
             return thought, self._finalize_reply_only(reply) # Clean keywords from reply
         
         # 未命中锚点 -> 进入安全检查
-        has_tag = self.cot_start_tag in text
+        has_tag = (self.cot_start_tag in text) or (self.cot_end_tag in text)
         
         if has_tag:
             # 有标签但无锚点 -> 格式错误/潜在泄露 -> 零信任拦截
-            raise ValueError(f"检测到 '{self.cot_start_tag}' 但缺失锚点，触发零信任拦截。")
+            raise ValueError(f"检测到思维链标签但缺失锚点，触发零信任拦截。")
             
         # 既无标签也无锚点 -> 放行
         return None, self._finalize_reply_only(text)
@@ -442,8 +442,8 @@ class IntelligentRetryWithCoT(Star):
                 resp.completion_text = res.get_plain_text() if res else ""
             else:
                 if self.fallback_reply:
-                    self._apply_fallback(event)
-                    resp.completion_text = self.fallback_reply
+                    await event.send(Comp.Plain(self.fallback_reply))
+                    resp.completion_text = ""
         else:
             # 2. 成功提交 (Submission) - 仅在无需重试时执行
             
@@ -500,21 +500,28 @@ class IntelligentRetryWithCoT(Star):
 
     @event_filter.on_decorating_result(priority=5)
     async def final_cot_stripper(self, event: AstrMessageEvent):
-        """最后一道防线"""
+        """最后一道防线：全局清洗"""
         result = event.get_result()
         if not result or not result.chain: return
+        
+        # 获取全文进行判断，避免组件碎片化处理导致的部分替换、部分泄露
         plain_text = result.get_plain_text()
-        has_tag = self.cot_start_tag in plain_text or self.FINAL_REPLY_PATTERN.search(plain_text)
+        has_tag = (self.cot_start_tag in plain_text) or (self.cot_end_tag in plain_text)
         
         if has_tag:
-            for comp in result.chain:
-                if isinstance(comp, Comp.Plain) and comp.text:
-                    # 使用统一的提取逻辑进行清洗，不记录日志 (防线层)
-                    try:
-                        _, reply = self._safe_process_response(comp.text)
-                        comp.text = reply
-                    except ValueError:
-                         comp.text = self.fallback_reply
+            try:
+                # 尝试对全文进行提取
+                _, reply = self._safe_process_response(plain_text)
+                
+                # 如果成功提取（找到了锚点），重构消息链只保留回复
+                # 这是一个破坏性操作，但在防泄露场景下是必要的
+                result.chain.clear()
+                result.chain.append(Comp.Plain(reply))
+                
+            except ValueError:
+                # 如果全文判定非法（有标签无锚点），全量替换为兜底
+                result.chain.clear()
+                result.chain.append(Comp.Plain(self.fallback_reply))
 
     # --- Helper Methods ---
 
