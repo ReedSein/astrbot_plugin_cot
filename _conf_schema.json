@@ -17,6 +17,18 @@
     "hint": "用于分割思维链和最终回复的正则表达式锚点。锚点前为思维链，锚点后为回复。",
     "default": "最终的罗莎回复[:：]?\\s*"
   },
+  "cot_start_tag": {
+    "description": "思维链开始标签",
+    "type": "string",
+    "hint": "思维链内容的开始标记，如 <ROSAOS>",
+    "default": "<ROSAOS>"
+  },
+  "cot_end_tag": {
+    "description": "思维链结束标签",
+    "type": "string",
+    "hint": "思维链内容的结束标记，如 </ROSAOS>",
+    "default": "</ROSAOS>"
+  },
   "filtered_keywords": {
     "description": "回复关键词过滤",
     "type": "list",
