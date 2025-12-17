@@ -714,58 +714,68 @@ class IntelligentRetryWithCoT(Star):
             return None
 
     async def _execute_retry_sequence(self, event: AstrMessageEvent, request_key: str) -> bool:
-        """执行重试循环"""
+        """
+        [Audited Fix] 执行重试循环
+        修正了异常吞噬问题，确保格式错误(ValueError)必定触发下一次重试。
+        """
         delay = max(0, int(self.retry_delay))
         session_id = event.unified_msg_origin
         
-        for attempt in range(1, self.max_attempts + 1):
+        retries = 0
+        while retries < self.max_attempts:
+            retries += 1
+            attempt = retries # Alias for readability
             logger.warning(f"[IntelligentRetry] 🔄 (Session: {session_id}) 正在执行第 {attempt}/{self.max_attempts} 次重试...")
             
+            # 1. 执行请求
             new_response = await self._perform_retry_with_stored_params(request_key)
             
-            # Check 1: Response exists and has content
-            if new_response and getattr(new_response, "completion_text", ""):
-                raw_text = new_response.completion_text
-                
-                # Check 2: Content is NOT an error (Validation using raw_text)
-                try:
-                    thought, reply = self._safe_process_response(raw_text)
-                    is_valid = True
-                except ValueError:
-                    is_valid = False
-                
-                if not self._should_retry_response(new_response) and is_valid:
-                    logger.info(f"[IntelligentRetry] ✅ 第 {attempt} 次重试成功")
-                                        
-                    # 1. 提取与清洗 (Extraction) - 已在上方完成
-                    # thought, reply = self._extract_thought_and_reply(raw_text)
-
-                    # 2. 补全历史 (Fix History with CLEAN reply)
-                    await self._fix_user_history(event, request_key, bot_reply=reply)
-                    
-                    # 3. 日志缓冲提交 (Commit Log)
-                    log_payload = thought if thought else "[NO_THOUGHT_FLAG]"
-                    await self._async_save_thought(session_id, log_payload)
-                    
-                    # 4. 更新结果 (Update Result)
-                    final_res = MessageEventResult()
-                    if self.display_cot_text and thought:
-                        final_res.message(f"🤔 罗莎思考中：\n{thought}\n\n---\n\n{reply}")
-                    else:
-                        final_res.message(reply)
-                        
-                    final_res.result_content_type = ResultContentType.LLM_RESULT
-                    event.set_result(final_res)
-                    return True
-                else:
-                    logger.warning(f"[IntelligentRetry] ⚠️ 第 {attempt} 次重试结果仍无效: {raw_text[:30]}...")
-            else:
+            # 2. 检查响应是否存在
+            if not new_response or not getattr(new_response, "completion_text", ""):
                  logger.warning(f"[IntelligentRetry] ⚠️ 第 {attempt} 次重试返回空 (可能再次超时)")
+                 if retries < self.max_attempts: await asyncio.sleep(delay * retries)
+                 continue # 强制进入下一次循环
+
+            raw_text = new_response.completion_text
             
-            if attempt < self.max_attempts: 
-                real_delay = delay * attempt 
-                await asyncio.sleep(real_delay)
+            # 3. 结构安全检查 (Zero Trust)
+            try:
+                thought, reply = self._safe_process_response(raw_text)
+                # 如果能走到这里，说明结构合法
+            except ValueError as e:
+                # [Critical Fix] 捕获格式错误，绝对不能吞噬，必须 continue
+                logger.warning(f"[IntelligentRetry] ⚠️ 第 {attempt} 次重试格式校验失败: {e} | 片段: {raw_text[:30]}...")
+                if retries < self.max_attempts: await asyncio.sleep(delay * retries)
+                continue # 强制进入下一次循环
+            
+            # 4. 内容关键词/API错误检查
+            if self._should_retry_response(new_response):
+                logger.warning(f"[IntelligentRetry] ⚠️ 第 {attempt} 次重试触发内容拦截 (API Error/Keywords)")
+                if retries < self.max_attempts: await asyncio.sleep(delay * retries)
+                continue # 强制进入下一次循环
+
+            # ================= 成功出口 =================
+            logger.info(f"[IntelligentRetry] ✅ 第 {attempt} 次重试成功")
+            
+            # A. 补全历史
+            await self._fix_user_history(event, request_key, bot_reply=reply)
+            
+            # B. 日志存储
+            log_payload = thought if thought else "[NO_THOUGHT_FLAG]"
+            await self._async_save_thought(session_id, log_payload)
+            
+            # C. 更新结果
+            final_res = MessageEventResult()
+            if self.display_cot_text and thought:
+                final_res.message(f"🤔 罗莎思考中：\n{thought}\n\n---\n\n{reply}")
+            else:
+                final_res.message(reply)
+                
+            final_res.result_content_type = ResultContentType.LLM_RESULT
+            event.set_result(final_res)
+            return True # 任务完成
         
+        # 循环结束仍未返回 True，说明全部失败
         logger.error(f"[IntelligentRetry] ❌ {self.max_attempts} 次重试全部失败。")
         return False
 
