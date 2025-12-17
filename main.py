@@ -368,7 +368,7 @@ class IntelligentRetryWithCoT(Star):
 
 
     @event_filter.on_llm_request(priority=70)
-    async def store_llm_request(self, event: AstrMessageEvent, req):
+    async def store_llm_request(self, event: AstrMessageEvent, req, *args):
         """记录请求上下文"""
         if not hasattr(req, "prompt"): return
         # 检查是否是排除命令（配置化）
@@ -477,7 +477,7 @@ class IntelligentRetryWithCoT(Star):
             await self._async_save_thought(event.unified_msg_origin, log_payload)
         
     @event_filter.on_decorating_result(priority=20)
-    async def intercept_api_error(self, event: AstrMessageEvent):
+    async def intercept_api_error(self, event: AstrMessageEvent, *args):
         """
         [NEW] 异常拦截层 (Priority=20) - 物理静音版
         使用正则表达式强力捕获 Core 抛出的格式化异常。
@@ -517,7 +517,7 @@ class IntelligentRetryWithCoT(Star):
             # Fix: 移除 pop 操作，保持上下文直到自然过期
 
     @event_filter.on_decorating_result(priority=5)
-    async def final_cot_stripper(self, event: AstrMessageEvent):
+    async def final_cot_stripper(self, event: AstrMessageEvent, *args):
         """最后一道防线：全局清洗"""
         result = event.get_result()
         if not result or not result.chain: return
