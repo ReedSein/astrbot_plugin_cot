@@ -721,19 +721,17 @@ class IntelligentRetryWithCoT(Star):
         delay = max(0, int(self.retry_delay))
         session_id = event.unified_msg_origin
         
-        retries = 0
-        while retries < self.max_attempts:
-            retries += 1
-            attempt = retries # Alias for readability
-            logger.warning(f"[IntelligentRetry] 🔄 (Session: {session_id}) 正在执行第 {attempt}/{self.max_attempts} 次重试...")
+        for attempt in range(self.max_attempts):
+            current_attempt = attempt + 1
+            logger.warning(f"[IntelligentRetry] 🔄 (Session: {session_id}) 正在执行第 {current_attempt}/{self.max_attempts} 次重试...")
             
             # 1. 执行请求
             new_response = await self._perform_retry_with_stored_params(request_key)
             
             # 2. 检查响应是否存在
             if not new_response or not getattr(new_response, "completion_text", ""):
-                 logger.warning(f"[IntelligentRetry] ⚠️ 第 {attempt} 次重试返回空 (可能再次超时)")
-                 if retries < self.max_attempts: await asyncio.sleep(delay * retries)
+                 logger.warning(f"[IntelligentRetry] ⚠️ 第 {current_attempt} 次重试返回空 (可能再次超时)")
+                 if current_attempt < self.max_attempts: await asyncio.sleep(delay * current_attempt)
                  continue # 强制进入下一次循环
 
             raw_text = new_response.completion_text
@@ -744,18 +742,19 @@ class IntelligentRetryWithCoT(Star):
                 # 如果能走到这里，说明结构合法
             except ValueError as e:
                 # [Critical Fix] 捕获格式错误，绝对不能吞噬，必须 continue
-                logger.warning(f"[IntelligentRetry] ⚠️ 第 {attempt} 次重试格式校验失败: {e} | 片段: {raw_text[:30]}...")
-                if retries < self.max_attempts: await asyncio.sleep(delay * retries)
+                logger.warning(f"格式错误，正在进行第 {current_attempt}/{self.max_attempts} 次重试...")
+                logger.warning(f"[IntelligentRetry] ⚠️ 第 {current_attempt} 次重试格式校验失败: {e} | 片段: {raw_text[:30]}...")
+                if current_attempt < self.max_attempts: await asyncio.sleep(delay * current_attempt)
                 continue # 强制进入下一次循环
             
             # 4. 内容关键词/API错误检查
             if self._should_retry_response(new_response):
-                logger.warning(f"[IntelligentRetry] ⚠️ 第 {attempt} 次重试触发内容拦截 (API Error/Keywords)")
-                if retries < self.max_attempts: await asyncio.sleep(delay * retries)
+                logger.warning(f"[IntelligentRetry] ⚠️ 第 {current_attempt} 次重试触发内容拦截 (API Error/Keywords)")
+                if current_attempt < self.max_attempts: await asyncio.sleep(delay * current_attempt)
                 continue # 强制进入下一次循环
 
             # ================= 成功出口 =================
-            logger.info(f"[IntelligentRetry] ✅ 第 {attempt} 次重试成功")
+            logger.info(f"[IntelligentRetry] ✅ 第 {current_attempt} 次重试成功")
             
             # A. 补全历史
             await self._fix_user_history(event, request_key, bot_reply=reply)
