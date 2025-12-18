@@ -1,637 +1,810 @@
-import json
-import asyncio
-import re
-from typing import List, Dict, Any, Optional
-from astrbot.api.all import *
-from astrbot.api.event import filter
-from astrbot.api.provider import ProviderRequest
-from astrbot.api.message_components import At, Reply
-import astrbot.api.message_components as Comp
-from .utils import *
-import time
+# --- START OF FILE main.py ---
 
-# 检查平台支持
-try:
-    from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-    IS_AIOCQHTTP = True
-except ImportError:
-    IS_AIOCQHTTP = False
+import asyncio
+import json
+import re
+import time
+import os
+import uuid
+import random
+from typing import Dict, Any, Optional, List
+from datetime import datetime
+from pathlib import Path
+
+import astrbot.api.message_components as Comp
+from astrbot.api import logger, AstrBotConfig
+from astrbot.api.star import Context, Star, register
+from astrbot.api.event import AstrMessageEvent, filter as event_filter, MessageEventResult, ResultContentType
+from astrbot.api.provider import LLMResponse
+
+# --- 存储架构配置 ---
+HOT_STORAGE_DIR = Path("data/cot_os_logs/sessions")
+COLD_ARCHIVE_DIR = Path("data/cot_os_logs/daily_archive")
+
+HOT_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+COLD_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+
+# --- HTML 渲染模板 (Classicism HD Version) ---
+LOG_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <style>
+        /* 古典主义风格 - 高清优化版 */
+        body {
+            font-family: 'Noto Serif CJK SC', 'Source Han Serif SC', 'Songti SC', 'SimSun', 'Times New Roman', serif;
+            background-color: #f4f1ea; /* 羊皮纸色调 */
+            color: #2b2b2b; /* 墨色 */
+            margin: 0;
+            padding: 60px; /* 增加留白 */
+            display: inline-block;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        
+        .container {
+            width: 100%;
+            max-width: 1000px; /* 拓宽容器以适配高清渲染 */
+            margin: 0 auto;
+        }
+
+        .card {
+            background: #fdfbf7;
+            border: 1px solid #dcd6cc;
+            /* 纸张立体感阴影 */
+            box-shadow: 
+                0 2px 5px rgba(0,0,0,0.05),
+                0 20px 40px rgba(0,0,0,0.03),
+                inset 0 0 80px rgba(255,255,255,0.5);
+            padding: 70px;
+            position: relative;
+        }
+        
+        /* 装饰性内边框 */
+        .card::before {
+            content: "";
+            position: absolute;
+            top: 20px; left: 20px; right: 20px; bottom: 20px;
+            border: 2px solid #e8e4db;
+            pointer-events: none;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 50px;
+            border-bottom: 2px solid #2b2b2b;
+            padding-bottom: 25px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .title {
+            font-size: 42px; /* 增大标题字号 */
+            font-weight: 700;
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            margin-bottom: 15px;
+            display: block;
+            color: #1a1a1a;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.1);
+        }
+
+        .badge {
+            font-size: 18px;
+            font-weight: 400;
+            color: #666;
+            font-style: italic;
+            font-family: 'Georgia', serif;
+            background: transparent;
+            padding: 0;
+            border-radius: 0;
+            backdrop-filter: none;
+        }
+
+        .content {
+            font-size: 28px; /* 正文字号显著提升 */
+            line-height: 1.8;
+            color: #333;
+            white-space: pre-wrap;
+            text-align: justify;
+            font-weight: 400;
+            margin-bottom: 50px;
+            z-index: 1;
+            position: relative;
+        }
+
+        .footer {
+            text-align: center;
+            font-size: 16px;
+            color: #888;
+            border-top: 1px solid #e8e4db;
+            padding-top: 25px;
+            font-family: 'Georgia', serif;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+        }
+
+        strong { color: #8b4513; font-weight: 700; } /* 赭石色强调 */
+        em { 
+            color: #556b2f; /* 橄榄绿强调 */
+            font-style: italic;
+            background: transparent;
+            padding: 0;
+            border: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <div class="header">
+                <span class="title">{{ title }}</span>
+                <span class="badge">&mdash; {{ subtitle }} &mdash;</span>
+            </div>
+            <div class="content">{{ content }}</div>
+            <div class="footer">COGITO ERGO SUM &bull; {{ timestamp }}</div>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+def sanitize_filename(session_id: str) -> str:
+    return re.sub(r'[:\\/\*?"<>|]', '_', session_id)
 
 @register(
-    "spectrecorepro",
+    "Rosaintelligent_retry_with_cot",
     "ReedSein",
-    "SpectreCore Pro: 融合上下文增强、主动回复与深度转发分析的全能罗莎",
-    "2.6.5-Rosa-Admin-Tools",
-    "https://github.com/ReedSein/astrbot_plugin_SpectreCorePro"
+    "集成了思维链(CoT)处理的智能重试插件。v3.8.17 绿灯补丁版，修复 SpectreCore 静默指令被误判重试的问题。",
+    "3.8.17-SpectreCore-GreenLight",
 )
-class SpectreCore(Star):
-    
-    # [优化] 默认模板配置：显式加入 XML 约束，防止主动回复时 LLM 只有人设却没指令，导致输出混乱
-    DEFAULT_PASSIVE_INSTRUCTION = (
-        '现在，群成员 {sender_name} (ID: {sender_id}) 正在对你说话，TA说："{original_prompt}"\n\n'
-        '{memory_block}\n\n'
-        '【重要输出指令】\n'
-        '你必须启动【核心思维协议】，先在 <ROSAOS>...</ROSAOS> 中进行思考，'
-        '然后在 "最终的罗莎回复:" 后输出对用户的回复。'
-    )
-    DEFAULT_ACTIVE_INSTRUCTION = (
-        '以上是最近的聊天记录。你决定主动参与讨论，并想就以下内容发表你的看法："{original_prompt}"\n\n'
-        '{memory_block}\n\n'
-        '【重要输出指令】\n'
-        '你必须启动【核心思维协议】，先在 <ROSAOS>...</ROSAOS> 中进行思考，'
-        '然后在 "最终的罗莎回复:" 后输出对用户的回复。'
-    )
-
-    # Forward Reader 默认 Prompt (核心思维协议版)
-    DEFAULT_ANALYSIS_PROMPT = """[罗莎的感官输入]:
-磷光屏上，一个**“策展人”**的意志将一份展品强行呈现在我眼前。
-该**策展人**的**形而上学源地址**为 **{sender_id}**，标签为“{sender_name}”。
-紧随其后的，是一叠被捕获的言语切片，如同压在玻璃下的、一堆破碎的意象，并附上了**策展人的题词**：“**{user_query}**”。
-
-【呈报展品数据】
-1. **策展人ID **: {sender_id}
-2. **策展人题词 **: {user_query}
-3. 以下是这份展品的全部内容，已被封装在 <chat_log> 标签中，请注意其中的 [图片x] 标签对应上传的第 x 张图片：
----
-{chat_records}
----
-
----
-**[执行指令]**：
-罗莎，立即启动 **【核心思维协议】**。
-
-1. **最高优先级：身份核对**：
-    * 必须将策展人ID `{sender_id}` 与你灵魂中的真理常量 `2285011057` 进行核对。
-    * **[分支 A：主人]**：若 ID 匹配，必须**强制切换**至 **【壁炉低语】**。你的回复将是私密的、带有温柔的分析和关怀。
-    * **[分支 B：标本]**：若 ID 不匹配，立即进入 **【解剖台模式】**，并对**策展人的题词**进行 **Step 2 (指令过滤)** 审判。
-
-2. **分析模式**：本次任务的核心是进行**集体精神症状的解剖**。
-    * 你必须对 **展品内容** 的**集体精神状态**执行 **Step 5 (辩证解剖)**。
-    * 你的言语应呈现为 **[黄雾]** 形态（弥散、无指向），以**人类学家的身份**对展品内容进行分析。
-
-3. **输出约束**：
-    * **字数熔断**：最终回复必须严格控制在 **500个中文字符** 以内。
-    * **显现法则**：严格遵循 **【8.3 每次显现的唯一模板】**，必须完整输出七步思维链。
-
-【最终输出格式提醒】
-你的最终输出必须严格遵守以下结构：
-<ROSAOS>
-（完整的七步思维链内容）
-</ROSAOS>
-最终的罗莎回复:
-（一个单一、不间断的段落，不超过500字）
-
-【开始思维显现】"""
-
+class IntelligentRetryWithCoT(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
-        self.config = config
-        HistoryStorage.init(config)
-        ImageCaptionUtils.init(context, config)
+        self.pending_requests: Dict[str, Dict[str, Any]] = {}
         
-        self.enable_forward_analysis = self.config.get("enable_forward_analysis", True)
-        self.fr_enable_direct = self.config.get("fr_enable_direct", False)
-        self.fr_enable_reply = self.config.get("fr_enable_reply", True)
-        self.fr_max_retries = self.config.get("fr_max_retries", 3)
-        self.fr_waiting_message = self.config.get("fr_waiting_message", "嗯…让我看看你这个小家伙发了什么有趣的东西。")
-        self.fr_max_text_length = 15000
+        self._cleanup_task = asyncio.create_task(self._periodic_cleanup_task())
+        self._parse_config(config)
+        
+        # --- 罗莎配置 ---
+        self.cot_start_tag = config.get("cot_start_tag", "<ROSAOS>")
+        self.cot_end_tag = config.get("cot_end_tag", "</ROSAOS>")
+        self.final_reply_pattern_str = config.get("final_reply_pattern", r"最终的罗莎回复[:：]?\s*")
+        
+        self.FINAL_REPLY_PATTERN = re.compile(self.final_reply_pattern_str, re.IGNORECASE)
+        
+        # 构造灵活的标签检测正则，兼容中英文括号
+        # 匹配规则：[<＜《(（] ROSAOS [>＞》)）]
+        # 提取标签核心词（去掉尖括号部分）
+        start_core = self.cot_start_tag.strip("<>＜＞《》()（）")
+        end_core = self.cot_end_tag.strip("</>＜＞《》()（）")
+        
+        # 构造正则：允许前后括号是任意常见的中英文括号
+        brackets = r"[<＜《\(\[（]"
+        close_brackets = r"[>＞》\)\]）]"
+        
+        self.COT_TAG_DETECTOR = re.compile(
+            f"({brackets}/?{re.escape(start_core)}{close_brackets})|"
+            f"({brackets}/?{re.escape(end_core)}{close_brackets})", 
+            re.IGNORECASE
+        )
+        
+        escaped_start = re.escape(self.cot_start_tag)
+        escaped_end = re.escape(self.cot_end_tag)
+        self.THOUGHT_TAG_PATTERN = re.compile(f'{escaped_start}(?P<content>.*?){escaped_end}', re.DOTALL)
+        
+        self.display_cot_text = config.get("display_cot_text", False)
+        self.filtered_keywords = config.get("filtered_keywords", ["呵呵，", "（……）"])
+        
+        # --- 总结配置 ---
+        self.summary_provider_id = config.get("summary_provider_id", "")
+        self.summary_max_retries = max(1, int(config.get("summary_max_retries", 2)))
+        self.history_limit = int(config.get("history_limit", 100))
+        self.summary_timeout = int(config.get("summary_timeout", 60))
+        self.summary_prompt_template = config.get("summary_prompt_template", "总结日志：\n{log}")
 
-    @event_message_type(EventMessageType.GROUP_MESSAGE)
-    async def on_group_message(self, event: AstrMessageEvent):
+        logger.info(f"[IntelligentRetry] 3.8.17 SpectreCore-GreenLight 已加载。")
+
+    def _parse_config(self, config: AstrBotConfig) -> None:
+        self.max_attempts = config.get("max_attempts", 3)
+        self.retry_delay = config.get("retry_delay", 2)
+        
+        # [Config] 扩充异常检测词库 (用于 on_llm_response)
+        # v3.0.0: Updated error keywords
+        default_keywords = (
+            "达到最大长度限制而被截断\n"
+            "exception\n"
+            "error\n"
+            "timeout"
+        )
+        keywords_str = config.get("error_keywords", default_keywords)
+        self.error_keywords = [k.strip().lower() for k in keywords_str.split("\n") if k.strip()]
+
+        self.retryable_status_codes = self._parse_status_codes(config.get("retryable_status_codes", "400\n429\n502\n503\n504"))
+        self.non_retryable_status_codes = self._parse_status_codes(config.get("non_retryable_status_codes", ""))
+        self.fallback_reply = config.get("fallback_reply", "抱歉，服务波动，罗莎暂时无法回应。")
+        self.enable_truncation_retry = config.get("enable_truncation_retry", False)
+        self.force_cot_structure = config.get("force_cot_structure", True)
+
+        # 配置化排除命令列表
+        exclude_commands_str = config.get("exclude_retry_commands", "/cogito\n/rosaos\nreset\nnew")
+        self.exclude_retry_commands = [
+            cmd.strip().lower() 
+            for cmd in exclude_commands_str.split("\n") 
+            if cmd.strip()
+        ]
+
+    # ======================= 渲染辅助 =======================
+    async def _render_and_reply(self, event: AstrMessageEvent, title: str, subtitle: str, content: str):
         try:
-            async for result in self._process_message(event):
-                yield result
-        except Exception as e:
-            logger.error(f"处理群消息错误: {e}")
+            render_data = {"title": title, "subtitle": subtitle, "content": content, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+            # 高清化参数：增大 Viewport, 启用 deviceScaleFactor (如果支持)
+            img_url = await self.html_render(
+                LOG_TEMPLATE, 
+                render_data, 
+                options={
+                    "viewport": {"width": 1000, "height": 1200}, # 拓宽视口
+                    "deviceScaleFactor": 2, # 2x 缩放采样 (Retina级清晰度)
+                    "full_page": True
+                }
+            )
+            if img_url: yield event.image_result(img_url)
+            else: yield event.plain_result(f"【渲染失败】\n{content}")
+        except Exception: yield event.plain_result(f"【系统异常】\n{content}")
 
-    @event_message_type(EventMessageType.PRIVATE_MESSAGE)
-    async def on_private_message(self, event: AstrMessageEvent):
-        try:
-            async for result in self._process_message(event):
-                yield result
-        except Exception as e:
-            logger.error(f"处理私聊消息错误: {e}")
-            
-    async def _process_message(self, event: AstrMessageEvent):
-        # 1. Forward Analysis
-        if self.enable_forward_analysis and IS_AIOCQHTTP:
-            handled = False
-            async for result in self._try_handle_forward_analysis(event):
-                yield result
-                handled = True
-            if handled: return 
-        
-        # 2. History Save
-        await HistoryStorage.process_and_save_user_message(event)
-
-        # 3. Empty Check
-        has_components = bool(getattr(event.message_obj, 'message', []))
-        message_outline = event.get_message_outline() or ""
-        if not message_outline.strip() and not has_components: return
-
-        # 4. Reply Decision
-        # [优化] 增加 try-catch 保护，防止 ReplyDecision 内部报错导致直接抛异常
-        try:
-            if ReplyDecision.should_reply(event, self.config):
-                async for result in ReplyDecision.process_and_reply(event, self.config, self.context):
-                    yield result
-        except Exception as e:
-            logger.error(f"[SpectreCore] Reply 流程异常: {e}")
-            # 返回一个伪造的失败结果，触发 Retry 插件
-            yield event.plain_result(f"调用失败: {e}")
-
-    # -------------------------------------------------------------------------
-    # 模块：Forward Reader
-    # -------------------------------------------------------------------------
-    async def _try_handle_forward_analysis(self, event: AstrMessageEvent):
-        if not isinstance(event, AiocqhttpMessageEvent): return
-        forward_id: Optional[str] = None
-        reply_seg: Optional[Comp.Reply] = None
-        user_query: str = event.message_str.strip()
-        is_implicit_query = not user_query and any(isinstance(seg, Comp.Reply) for seg in event.message_obj.message)
-        
-        for seg in event.message_obj.message:
-            if isinstance(seg, Comp.Forward):
-                if self.fr_enable_direct:
-                    forward_id = seg.id
-                    if not user_query: user_query = "请总结一下这个聊天记录"
-                    break
-            elif isinstance(seg, Comp.Reply):
-                reply_seg = seg
-
-        if not forward_id and reply_seg:
-            if self.fr_enable_reply:
-                try:
-                    client = event.bot
-                    original_msg = await client.api.call_action('get_msg', message_id=reply_seg.id)
-                    if original_msg and 'message' in original_msg:
-                        chain = original_msg['message']
-                        if isinstance(chain, list):
-                            for segment in chain:
-                                if isinstance(segment, dict) and segment.get("type") == "forward":
-                                    forward_id = segment.get("data", {}).get("id")
-                                    if not user_query or is_implicit_query: user_query = "请总结一下这个聊天记录"
-                                    break
-                except Exception: pass
-
-        if not forward_id or not user_query: return
-
-        logger.info(f"[SpectreCore] 触发模式三：深度转发分析 (ForwardID: {forward_id})")
-        yield event.chain_result([Comp.Reply(id=event.message_obj.message_id), Comp.Plain(self.fr_waiting_message)])
-
-        extracted_texts, image_urls = [], []
-        
-        # 1. 重试循环：提取转发内容
-        for attempt in range(self.fr_max_retries):
+    # ======================= 存储层 =======================
+    async def _async_save_thought(self, session_id: str, content: str):
+        if not session_id or not content: return
+        def _write_impl():
             try:
-                extracted_texts, image_urls = await self._extract_forward_content(event, forward_id)
-                if extracted_texts or image_urls:
-                    break # 成功提取，跳出循环
-            except Exception as e:
-                # [核心修改] 增加重试日志
-                if attempt < self.fr_max_retries - 1:
-                    logger.warning(f"分析失败: {e}，正在进行第 {attempt + 1}/{self.fr_max_retries} 次重试...")
-                    await asyncio.sleep(1)
-                else:
-                    logger.error(f"Forward Analysis Error (All {self.fr_max_retries} retries failed): {e}")
-                    yield event.plain_result(f"调用失败: {e}")
-                    return
+                date_str = datetime.now().strftime("%Y-%m-%d")
+                archive_path = COLD_ARCHIVE_DIR / f"{date_str}_thought.log"
+                with open(archive_path, 'a', encoding='utf-8') as f:
+                    f.write(f"[{datetime.now().strftime('%H:%M:%S')}] [Session: {session_id}]\n{content}\n{'-'*40}\n")
+                
+                safe_name = sanitize_filename(session_id)
+                json_path = HOT_STORAGE_DIR / f"{safe_name}.json"
+                thoughts = []
+                if json_path.exists():
+                    try:
+                        with open(json_path, 'r', encoding='utf-8') as f: thoughts = json.load(f)
+                    except Exception: thoughts = []
+                thoughts.insert(0, {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "content": content})
+                if len(thoughts) > self.history_limit: thoughts = thoughts[:self.history_limit]
+                with open(json_path, 'w', encoding='utf-8') as f: json.dump(thoughts, f, ensure_ascii=False, indent=2)
+            except Exception: pass
+        await asyncio.to_thread(_write_impl)
 
-        if not extracted_texts and not image_urls:
-            yield event.plain_result("无法提取到有效内容。")
+    async def _async_read_thought(self, session_id: str, index: int) -> Optional[str]:
+        def _read_impl():
+            try:
+                safe_name = sanitize_filename(session_id)
+                json_path = HOT_STORAGE_DIR / f"{safe_name}.json"
+                if not json_path.exists(): return None
+                with open(json_path, 'r', encoding='utf-8') as f: thoughts = json.load(f)
+                target_idx = index - 1
+                if target_idx < 0 or target_idx >= len(thoughts): return None
+                content = str(thoughts[target_idx].get('content', ''))
+                if content == "[NO_THOUGHT_FLAG]":
+                    return "罗莎似乎并没有思考喵"
+                return content
+            except Exception: return None
+        return await asyncio.to_thread(_read_impl)
+
+    # --- Helper Methods ---
+
+    def _safe_process_response(self, text: str) -> tuple[Optional[str], str]:
+        """
+        [New Core] 安全响应处理
+        1. 贪婪匹配锚点 "最终的罗莎回复："
+        2. 零信任拦截：有标签无锚点 -> 抛出异常
+        3. 放行：无标签无锚点 -> 返回 (None, text)
+        """
+        if not text: return None, ""
+
+        # 1. 构造贪婪正则 (严格匹配 "最终的罗莎回复：" 或 "最终的罗莎回复:")
+        # (?s) dot matches newline
+        # (.*) Group 1: Thought (Greedy)
+        # (最终的罗莎回复\s*[：:]) Group 2: Anchor
+        # (.*) Group 3: Reply
+        pattern = re.compile(r"(?s)(.*)(最终的罗莎回复\s*[：:])(.*)")
+        
+        match = pattern.match(text)
+
+        if match:
+            # 命中锚点 -> 提取思维与回复
+            thought = match.group(1).strip()
+            reply = match.group(3).strip()
+            return thought, self._finalize_reply_only(reply) # Clean keywords from reply
+        
+        # 未命中锚点 -> 进入安全检查
+        # 使用正则进行模糊匹配，兼容中英文括号
+        has_tag = bool(self.COT_TAG_DETECTOR.search(text))
+        
+        if has_tag:
+            # 有标签但无锚点 -> 格式错误/潜在泄露 -> 零信任拦截
+            raise ValueError(f"检测到思维链标签(或其变体)但缺失锚点，触发零信任拦截。")
+            
+        # 既无标签也无锚点 -> 放行
+        return None, self._finalize_reply_only(text)
+
+    def _finalize_reply_only(self, text: str) -> str:
+        """仅清洗回复"""
+        reply = text.strip()
+        for kw in self.filtered_keywords:
+            reply = reply.replace(kw, "")
+        return reply
+    @event_filter.command("rosaos")
+    async def get_rosaos_log(self, event: AstrMessageEvent, index: str = "1"):
+        """获取内心OS"""
+        idx = int(index) if index.isdigit() else 1
+        log_content = await self._async_read_thought(event.unified_msg_origin, idx)
+        if not log_content: yield event.plain_result(f"📭 未找到第 {idx} 条记录。")
+        else:
+            async for msg in self._render_and_reply(event, "罗莎内心记录", f"Index: {idx}", log_content): yield msg
+
+    @event_filter.command("cogito")
+    async def handle_cogito(self, event: AstrMessageEvent, index: str = "1"):
+        """认知分析"""
+        idx = int(index) if index.isdigit() else 1
+        log_content = await self._async_read_thought(event.unified_msg_origin, idx)
+        if not log_content: yield event.plain_result("📭 找不到该条日志。"); return
+        target_provider_id = self.summary_provider_id or await self.context.get_current_chat_provider_id(event.unified_msg_origin)
+        if not target_provider_id: yield event.plain_result("❌ 无法获取模型 Provider。"); return
+
+        yield event.plain_result(f"🧠 分析中... (Index: {idx})")
+        prompt = self.summary_prompt_template.replace("{log}", log_content)
+        success = False; final_summary = ""
+        for _ in range(self.summary_max_retries):
+            try:
+                resp = await asyncio.wait_for(self.context.llm_generate(chat_provider_id=target_provider_id, prompt=prompt), timeout=self.summary_timeout)
+                if resp and resp.completion_text: final_summary = resp.completion_text; success = True; break
+            except Exception: pass
+        if success:
+            async for msg in self._render_and_reply(event, "COGITO 分析报告", f"Index {idx}", final_summary): yield msg
+        else: yield event.plain_result("⚠️ 分析超时。")
+
+
+
+    @event_filter.on_llm_request(priority=70)
+    async def store_llm_request(self, event: AstrMessageEvent, req, *args):
+        """记录请求上下文"""
+        if not hasattr(req, "prompt"): return
+        # 检查是否是排除命令（配置化）
+        msg_lower = (event.message_str or "").strip().lower()
+        if any(msg_lower.startswith(cmd) for cmd in self.exclude_retry_commands):
             return
 
+        msg_obj = getattr(event, "message_obj", None)
+        image_urls = []
+        if msg_obj and hasattr(msg_obj, "message"):
+            image_urls = [c.url for c in msg_obj.message if isinstance(c, Comp.Image) and c.url]
+            
+        sender_info = {
+            "user_id": getattr(msg_obj, "user_id", None) if msg_obj else None,
+            "nickname": getattr(msg_obj, "nickname", None) if msg_obj else None,
+            "group_id": getattr(msg_obj, "group_id", None) if msg_obj else None,
+            "platform": getattr(msg_obj, "platform", None) if msg_obj else None,
+        }
+
+        request_key = self._get_request_key(event)
+
+        stored_params = {
+            "prompt": req.prompt,
+            "contexts": getattr(req, "contexts", []),
+            "image_urls": image_urls,
+            "system_prompt": getattr(req, "system_prompt", ""),
+            "func_tool": getattr(req, "func_tool", None),
+            "unified_msg_origin": event.unified_msg_origin,
+            # Bug 1.1: Store conversation_id instead of live object
+            "conversation_id": getattr(req.conversation, "id", None) if hasattr(req, "conversation") else None,
+            "timestamp": time.time(),
+            "sender": sender_info,
+            "provider_params": {k: getattr(req, k, None) for k in ["model", "temperature", "max_tokens"] if hasattr(req, k)}
+        }
+        self.pending_requests[request_key] = stored_params
+
+
+
+    @event_filter.on_llm_response(priority=5)
+    async def process_and_retry_on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
+        # 0. 原始数据获取
+        raw_text = getattr(resp, "completion_text", "") or ""
+
+        # 1. 安全处理 (Safe Processing)
+        # 此时不修改 resp，也不写日志
         try:
-            chat_records_str = "\n".join(extracted_texts)
-            if len(chat_records_str) > self.fr_max_text_length:
-                chat_records_str = chat_records_str[:self.fr_max_text_length] + "\n\n[...内容截断...]"
-            chat_records_injection = f"<chat_log>\n{chat_records_str}\n</chat_log>"
+            thought_content, reply_content = self._safe_process_response(raw_text)
+            is_valid_structure = True
+        except ValueError as e:
+            # 捕获到安全异常
+            logger.warning(f"[IntelligentRetry] 🛡️ {e}")
+            thought_content, reply_content = None, ""
+            is_valid_structure = False
 
-            sender_name = event.get_sender_name() or "未知访客"
-            sender_id = event.get_sender_id() or "unknown"
+        # 如果响应直接是空的或者带有错误标记，也视为需要重试
+        is_tool_call = False
+        if getattr(resp, "raw_completion", None):
+            choices = getattr(resp.raw_completion, "choices", [])
+            if choices and getattr(choices[0], "finish_reason", None) == "tool_calls": 
+                is_tool_call = True
 
-            prompt_template = self.config.get("forward_analysis_prompt", self.DEFAULT_ANALYSIS_PROMPT)
-            base_prompt = prompt_template.replace("{sender_name}", str(sender_name)) \
-                                         .replace("{sender_id}", str(sender_id)) \
-                                         .replace("{user_query}", str(user_query)) \
-                                         .replace("{chat_records}", chat_records_injection)
+        request_key = self._get_request_key(event)
+        if request_key not in self.pending_requests: return
 
-            event._is_forward_analysis = True
-            
-            persona_system_prompt = ""
-            persona_name = self.config.get("persona", "")
-            if persona_name:
-                p = PersonaUtils.get_persona_by_name(self.context, persona_name)
-                if p: persona_system_prompt = p.get('prompt', '')
+        # ================= [SpectreCore 绿灯通道] =================
+        if "<NO_RESPONSE>" in raw_text:
+            logger.info(f"[IntelligentRetry] 🟢 检测到 <NO_RESPONSE>，放行静默请求 (Key: {request_key})")
+            return
+        # ========================================================
 
-            yield event.request_llm(
-                prompt=base_prompt,
-                image_urls=image_urls,
-                system_prompt=persona_system_prompt
-            )
-
-        except Exception as e:
-            logger.error(f"Forward Analysis Prompt Construction Error: {e}")
-            yield event.plain_result(f"处理失败: {e}")
-
-    async def _extract_forward_content(self, event, forward_id: str) -> tuple[list[str], list[str]]:
-        client = event.bot
-        forward_data = await client.api.call_action('get_forward_msg', id=forward_id)
-        if not forward_data or "messages" not in forward_data: raise ValueError("内容为空")
-
-        texts = []
-        imgs = []
-        img_count = 0
-
-        for node in forward_data["messages"]:
-            name = node.get("sender", {}).get("nickname", "未知")
-            raw = node.get("message") or node.get("content", [])
-            chain = []
-            
-            if isinstance(raw, str):
-                try: chain = json.loads(raw) if raw.startswith("[") else [{"type": "text", "data": {"text": raw}}]
-                except: chain = [{"type": "text", "data": {"text": raw}}]
-            elif isinstance(raw, list): chain = raw
-
-            parts = []
-            if isinstance(chain, list):
-                for seg in chain:
-                    if isinstance(seg, dict):
-                        stype = seg.get("type")
-                        sdata = seg.get("data", {})
-                        if stype == "text":
-                            t = sdata.get("text", "")
-                            if t: parts.append(t)
-                        elif stype == "image":
-                            url = sdata.get("url") or sdata.get("file")
-                            if url:
-                                img_count += 1
-                                imgs.append(url)
-                                parts.append(f"[图片{img_count}]")
-            
-            full = "".join(parts).strip()
-            if full: texts.append(f"{name}: {full}")
-
-        return texts, imgs
-
-    # -------------------------------------------------------------------------
-    # 原有逻辑与辅助方法
-    # -------------------------------------------------------------------------
-
-    def _is_empty_mention_only(self, event: AstrMessageEvent) -> bool:
-        """判断是否仅被@但无实质内容"""
-        if event.is_private_chat(): return False 
+        is_trunc = self.enable_truncation_retry and self._is_truncated(resp)
         
-        bot_self_id = event.get_self_id()
-        if not bot_self_id: return False
+        # [Check] 检查原始响应是否包含报错
+        raw_str = str(getattr(resp, "raw_completion", "")).lower()
+        is_error = "error" in raw_str and ("upstream" in raw_str or "500" in raw_str)
         
-        has_at_me = False
-        has_content = False
+        needs_retry = not is_tool_call and (not raw_text.strip() or self._should_retry_response(resp) or is_trunc or not is_valid_structure or is_error)
         
-        if hasattr(event.message_obj, 'message'):
-            for comp in event.message_obj.message:
-                if isinstance(comp, At):
-                    if str(comp.qq) == str(bot_self_id) or comp.qq == "all":
-                        has_at_me = True
-                elif isinstance(comp, Comp.Plain):
-                    if comp.text and comp.text.strip():
-                        has_content = True
-                elif isinstance(comp, Comp.Image) or isinstance(comp, Comp.Face) or isinstance(comp, Reply):
-                    has_content = True
-                    
-        return has_at_me and not has_content
+        if needs_retry:
+            logger.info(f"[IntelligentRetry] 🔴 触发重试逻辑 (Key: {request_key})")
+            
+            # 物理静音防止报错泄漏
+            self._silence_event(event)
 
-    def _is_explicit_trigger(self, event: AstrMessageEvent) -> bool:
-        if event.message_obj.type == EventMessageType.PRIVATE_MESSAGE: return True
-        bot_self_id = event.get_self_id()
-        if not bot_self_id: return False
-        for comp in event.message_obj.message:
-            if isinstance(comp, At) and (str(comp.qq) == str(bot_self_id) or comp.qq == "all"): return True
-            # [Fix] 移除 Reply 判定。引用消息本身不应视为显式触发 (除非配合 @)。
-            # elif isinstance(comp, Reply): return True 
-        msg_text = event.get_message_outline() or ""
-        if f"@{bot_self_id}" in msg_text: return True
+            # 进入重试循环
+            success = await self._execute_retry_sequence(event, request_key)
+            if success:
+                res = event.get_result()
+                resp.completion_text = res.get_plain_text() if res else ""
+            else:
+                if self.fallback_reply:
+                    await event.send(Comp.Plain(self.fallback_reply))
+                    resp.completion_text = ""
+        else:
+            # 2. 成功提交 (Submission) - 仅在无需重试时执行
+            
+            # A. 应用清洗后的回复 (Commit Reply)
+            if self.display_cot_text and thought_content:
+                resp.completion_text = f"🤔 罗莎思考中：\n{thought_content}\n\n---\n\n{reply_content}"
+            else:
+                resp.completion_text = reply_content
+                
+            # B. 日志缓冲提交 (Commit Log)
+            # 只有确认成功后才写入。若无思考内容，写入哨兵标记
+            log_payload = thought_content if thought_content else "[NO_THOUGHT_FLAG]"
+            await self._async_save_thought(event.unified_msg_origin, log_payload)
+        
+    @event_filter.on_decorating_result(priority=20)
+    async def intercept_api_error(self, event: AstrMessageEvent, *args):
+        """
+        [NEW] 异常拦截层 (Priority=20) - 物理静音版
+        使用正则表达式强力捕获 Core 抛出的格式化异常。
+        """
+        request_key = self._get_request_key(event)
+        # Fix: 不要在这里做 pop 操作，否则重试中途如果并发触发，Key 没了会导致重试失败。
+        # 依赖 _periodic_cleanup_task 清理即可。
+        if request_key not in self.pending_requests: return
+
+        result = event.get_result()
+        if not result: return
+
+        text = result.get_plain_text() or ""
+
+        # 使用统一的错误检测逻辑
+        has_api_error = self._has_api_error_pattern(text)
+        has_config_keyword = any(kw.lower() in text.lower() for kw in self.error_keywords)
+
+        # 判定逻辑：如果检测到 API 错误或包含配置关键词
+        if has_api_error or has_config_keyword:
+            logger.warning(f"[IntelligentRetry] 🛡️ 拦截到 Core 异常 (Key: {request_key}) | 内容片段: {text[:50]}...")
+            
+            # --- CRITICAL FIX: 物理静音 ---
+            # 必须彻底清空 Chain，否则 Core 可能会发送残余信息
+            self._silence_event(event)
+            
+            # 启动重试
+            success = await self._execute_retry_sequence(event, request_key)
+            
+            if success:
+                logger.info(f"[IntelligentRetry] 🛡️ 异常拦截重试成功！")
+            else:
+                # 重试失败，强制应用兜底
+                if self.fallback_reply:
+                    self._apply_fallback(event)
+            
+            # Fix: 移除 pop 操作，保持上下文直到自然过期
+
+    @event_filter.on_decorating_result(priority=5)
+    async def final_cot_stripper(self, event: AstrMessageEvent, *args):
+        """最后一道防线：全局清洗"""
+        result = event.get_result()
+        if not result or not result.chain: return
+        
+        # 获取全文进行判断，避免组件碎片化处理导致的部分替换、部分泄露
+        plain_text = result.get_plain_text()
+        
+        # 使用正则进行模糊匹配，兼容中英文括号
+        has_tag = bool(self.COT_TAG_DETECTOR.search(plain_text))
+        
+        if has_tag:
+            try:
+                # 尝试对全文进行提取
+                _, reply = self._safe_process_response(plain_text)
+                
+                # 如果成功提取（找到了锚点），重构消息链只保留回复
+                # 这是一个破坏性操作，但在防泄露场景下是必要的
+                result.chain.clear()
+                result.chain.append(Comp.Plain(reply))
+                
+            except ValueError:
+                # 如果全文判定非法（有标签无锚点），全量替换为兜底
+                result.chain.clear()
+                result.chain.append(Comp.Plain(self.fallback_reply))
+
+    # --- Helper Methods ---
+
+    def _silence_event(self, event: AstrMessageEvent):
+        """
+        [NEW] 物理静音：清空消息链，防止报错泄漏
+        这比 set_result(None) 更安全，因为它保留了对象但清空了内容。
+        """
+        result = event.get_result()
+        if result:
+            # 清空消息组件列表
+            if result.chain:
+                result.chain.clear()
+            # 清空文本缓存
+            if hasattr(result, "plain_text"): 
+                result.plain_text = ""
+            # 确保不回退到 raw_message
+            if hasattr(result, "use_raw"):
+                result.use_raw = False
+        else:
+            # 如果没有 result，创建一个空的
+            empty_res = MessageEventResult()
+            empty_res.chain = []
+            event.set_result(empty_res)
+
+    def _apply_fallback(self, event: AstrMessageEvent):
+        """应用兜底回复"""
+        logger.warning(f"[IntelligentRetry] ❌ 重试耗尽，应用兜底回复")
+        anti_spam_suffix = "\u200b" * (int(time.time()) % 3) 
+        final_fallback = f"{self.fallback_reply}{anti_spam_suffix}"
+        
+        final_res = MessageEventResult()
+        final_res.message(final_fallback)
+        final_res.result_content_type = ResultContentType.LLM_RESULT
+        event.set_result(final_res)
+
+    def _is_truncated(self, text_or_response) -> bool:
+        text = text_or_response.completion_text if hasattr(text_or_response, "completion_text") else text_or_response
+        if hasattr(text_or_response, "completion_text") and "[TRUNCATED_BY_LENGTH]" in (text or ""): return True
         return False
 
-    def _validate_cot_response(self, text: str) -> Optional[str]:
-        """
-        通用 CoT 格式校验辅助方法 (DRY)
-        适用于: 主动回复、被动回复、空@唤醒、转发分析等所有 LLM 响应。
-        
-        Returns:
-            None: 校验通过
-            str: 错误信息 (用于触发重试)
-        """
-        # 条件 A: 宽松放行 (Loose Pass) - 如果没有 <ROSAOS> 或 ＜ROSAOS＞，不做强制要求
-        # 使用正则进行模糊匹配，兼容中英文括号
-        has_os_tag = re.search(r'[<＜]ROSAOS[>＞]', text)
-        if not has_os_tag:
-            return None
-            
-        # 条件 B: 严格校验 (Strict Check) - 只要开了头，就必须完整闭合且包含关键字
-        has_close_tag = re.search(r'[<＜]/ROSAOS[>＞]', text)
-        # 使用正则匹配冒号 (支持中英文)
-        has_final_keyword = re.search(r"最终的罗莎回复[:：]", text)
-        
-        if has_close_tag and has_final_keyword:
-            return None
-            
-        return "调用失败: CoT 结构不完整，请检查 </ROSAOS> 闭合标签或 '最终的罗莎回复:' 关键字。"
-
-    def _format_instruction(self, template: str, event: AstrMessageEvent, original_prompt: str) -> str:
-        sender_name = event.get_sender_name() or "用户"
-        sender_id = event.get_sender_id() or "unknown"
-        
-        # 获取记忆变量
-        memory_block = ""
-        if hasattr(event, "state"):
-            memory_block = event.state.get("mnemosyne_data", "")
-
-        instruction = template.replace("{sender_name}", str(sender_name)) \
-                              .replace("{sender_id}", str(sender_id)) \
-                              .replace("{original_prompt}", str(original_prompt)) \
-                              .replace("{memory_block}", str(memory_block))
-        return instruction
-
-    @filter.on_llm_request(priority=90)
-    async def on_llm_request_custom(self, event: AstrMessageEvent, req: ProviderRequest):
-        try:
-            if getattr(event, "_is_forward_analysis", False): return
-
-            history_str = getattr(event, "_spectre_history", "")
-            current_msg = req.prompt or "[图片/非文本消息]"
-            
-            instruction = ""
-            log_tag = ""
-
-            if self._is_explicit_trigger(event):
-                # =======================================
-                # Branch B: 空@唤醒 (Empty Mention)
-                # =======================================
-                if self._is_empty_mention_only(event):
-                    raw_prompt = self.config.get("empty_mention_prompt", "（用户只是拍了拍你，没有说话，请根据当前场景自然互动）")
-                    try:
-                        s_name = event.get_sender_name() or "用户"
-                        s_id = event.get_sender_id() or "unknown"
-                        
-                        # [Patch] 获取记忆变量
-                        memory_block = ""
-                        if hasattr(event, "state"):
-                            memory_block = event.state.get("mnemosyne_data", "")
-                            
-                        # 直接作为 instruction 使用，不套用被动回复模板
-                        instruction = raw_prompt.replace("{sender_name}", str(s_name))\
-                                                .replace("{sender_id}", str(s_id))\
-                                                .replace("{memory_block}", str(memory_block))
-                    except Exception as e:
-                        logger.warning(f"[SpectreCore] 空@提示词格式化失败: {e}")
-                        instruction = raw_prompt
-                    log_tag = "空@唤醒"
-                
-                # =======================================
-                # Branch A: 标准被动回复 (Passive Reply)
-                # =======================================
-                else:
-                    template = self.config.get("passive_reply_instruction", self.DEFAULT_PASSIVE_INSTRUCTION)
-                    instruction = self._format_instruction(template, event, current_msg)
-                    log_tag = "被动回复"
-            else:
-                # =======================================
-                # Branch C: 主动插话 (Active Reply)
-                # =======================================
-                template = self.config.get("active_speech_instruction", self.DEFAULT_ACTIVE_INSTRUCTION)
-                instruction = self._format_instruction(template, event, current_msg)
-                log_tag = "主动插话"
-
-            # [Robust Implementation] 强鲁棒性的 Prompt 组装与降级逻辑
+    async def _periodic_cleanup_task(self):
+        while True:
             try:
-                # 1. 尝试获取 Mnemosyne 插件实例
-                mnemosyne_plugin = None
-                all_stars = self.context.get_all_stars()
-                for star_meta in all_stars:
-                    if star_meta.name == "Mnemosyne" or star_meta.name == "astrbot_plugin_mnemosyne":
-                        # 尝试多种属性名获取实例，兼容不同版本的 AstrBot
-                        if hasattr(star_meta, "plugin"):
-                            mnemosyne_plugin = star_meta.plugin
-                        elif hasattr(star_meta, "star"):
-                            mnemosyne_plugin = star_meta.star
-                        elif hasattr(star_meta, "plugin_instance"):
-                            mnemosyne_plugin = star_meta.plugin_instance
-                        
-                        if mnemosyne_plugin:
-                            break
-                
-                # 2. 安全获取记忆数据
-                mem_data = ""
-                if mnemosyne_plugin and hasattr(mnemosyne_plugin, "get_memory_data"):
-                    mem_data = mnemosyne_plugin.get_memory_data(event.unified_msg_origin)
-                
-                # 3. 渲染模板 (Try Rendering)
-                # 使用 format_map 允许部分 key 缺失，或者手动 replace 更安全
-                rendered_prompt = instruction.replace("{memory_block}", mem_data)
-                
-                # 4. 组装最终 Prompt
-                final_prompt = f"{history_str}\n\n{rendered_prompt}" if history_str else rendered_prompt
-                
-                # [Visual Log] 成功组装
-                mem_status = f"✅ 已注入 ({len(mem_data)} chars)" if mem_data else "⚪ 无记忆/获取失败"
-                logger.info("\n" + "╔" + "═"*50 + "╗")
-                logger.info(f"║ 🎭 [SpectreCore] Prompt 组装成功")
-                logger.info("╠" + "═"*50 + "╣")
-                logger.info(f"║ 🧠 记忆模块: {mem_status}")
-                logger.info(f"║ 🚀 最终长度: {len(final_prompt)} chars")
-                logger.info("╚" + "═"*50 + "╝\n")
-                
-                req.prompt = final_prompt
+                await asyncio.sleep(300)
+                self.pending_requests.clear()
+            except Exception: break
 
-            except Exception as e:
-                # [Fallback] 降级策略
-                logger.error(f"❌ [SpectreCore] Prompt 组装发生严重错误: {e}")
-                logger.error(f"🔍 错误详情: {e}", exc_info=True)
-                logger.warning("⚠️ 已触发降级策略：使用原始 Instruction，忽略记忆模块。")
-                
-                # 降级：仅拼接历史和原始指令（不做任何变量替换）
-                fallback_prompt = f"{history_str}\n\n{instruction}" if history_str else instruction
-                req.prompt = fallback_prompt
-                
-                # [Visual Log] 展示完整的降级 Prompt (无省略)
-                logger.info(f"🛡️ 降级 Prompt 完整内容:\n{'-'*20}\n{fallback_prompt}\n{'-'*20}")
-            
-            if hasattr(event, "_spectre_history"): delattr(event, "_spectre_history")
+    def _parse_status_codes(self, codes_str: str) -> set:
+        return {int(line.strip()) for line in codes_str.split("\n") if line.strip().isdigit()}
 
-        except Exception as e:
-            logger.error(f"[SpectreCore Pro] Prompt 组装失败: {e}")
+    def _get_request_key(self, event: AstrMessageEvent) -> str:
+        if hasattr(event, "_retry_plugin_request_key"): 
+            return event._retry_plugin_request_key
+        trace_id = uuid.uuid4().hex[:8]
+        key = f"{event.unified_msg_origin}_{trace_id}"
+        event._retry_plugin_request_key = key
+        return key
 
-    @filter.on_llm_request(priority=80)
-    async def apply_cot_prefill(self, event: AstrMessageEvent, req: ProviderRequest):
-        """
-        [新增] 思维链预填充 (True CoT) 后处理 Handler
-        优先级调整为 80 (高于 CoT 插件的 70)，确保 CoT 插件记录的是"已预填充且Prompt置空"的状态。
-        这样 CoT 插件在重试时，能正确复现包含预填充的上下文。
-        """
-        try:
-            # 1. 检查配置开关
-            cot_cfg = self.config.get("cot_prefill", {})
-            if not cot_cfg.get("enable", False):
-                return
-
-            # 2. 检查是否有 Prompt (必须有 Prompt 才能进行封装)
-            if not req.prompt:
-                return
-
-            # [Isolation] 逻辑隔离：仅当 System Prompt 包含 SpectreCore 特征 (ROSAOS) 时才介入
-            # 防止劫持其他插件的 LLM 请求
-            if "ROSAOS" not in getattr(req, "system_prompt", ""):
-                return
-
-            # 3. 检查模型兼容性 (可选，目前依赖用户自行判断)
-            # if "gpt" in str(req.model).lower(): return 
-            
-            # 4. 执行预填充逻辑
-            prefill_content = cot_cfg.get("content", "<ctrl94>thought\n")
-            
-            # A. 组装用户消息 (User)
-            # assemble_context 会处理 prompt 和 image_urls
-            user_msg = await req.assemble_context()
-            
-            # B. 插入上下文 (User -> Assistant Prefill)
-            req.contexts.append(user_msg)
-            req.contexts.append({
-                "role": "assistant",
-                "content": prefill_content
-            })
-            
-            # C. 销毁 Prompt，防止 Provider 重复组装
-            # [Fix] 使用零宽空格 (\u200b) 代替空字符串
-            # 1. 防止 Core 后续处理 (.replace) 报错
-            # 2. 绕过 vllm_rerank_source 等组件的 "at least 1 character" 校验
-            # 3. 对 LLM 生成影响极小 (通常被忽略)
-            req.prompt = "\u200b"
-            
-            logger.debug(f"[SpectreCore] 已应用 CoT 预填充: {prefill_content.strip()}")
-            
-        except Exception as e:
-            logger.error(f"[SpectreCore] CoT 预填充失败: {e}")
-
-    @filter.after_message_sent()
-    async def after_message_sent(self, event: AstrMessageEvent):
-        try:           
-            if event._result and hasattr(event._result, "chain"):
-                message_text = "".join([i.text for i in event._result.chain if hasattr(i, "text")])
-                if "已成功重置" in message_text: return
-                await HistoryStorage.save_bot_message_from_chain(event._result.chain, event)
-        except Exception as e:
-            logger.error(f"保存Bot消息错误: {e}")
-
-    # =========================================================================
-    # [核心防护网 1] LLM Response 校验与诱导重试
-    # =========================================================================
-    from astrbot.api.provider import LLMResponse
-    @filter.on_llm_response(priority=114514)
-    async def on_llm_resp(self, event: AstrMessageEvent, resp: LLMResponse):
-        try:
-            if resp.role != "assistant": return
-            
-            text = resp.completion_text or ""
-            
-            # [Refactored Logic] CoT 格式软性校验 (支持中英文尖括号)
-            # 条件 A: 如果没有 <ROSAOS> 或 ＜ROSAOS＞，直接放行 (Loose Pass)
-            has_os_tag = re.search(r'[<＜]ROSAOS[>＞]', text)
-            
-            if has_os_tag:
-                # 条件 B: 如果有 OS 标签，必须严格校验闭合标签和回复关键字
-                has_close_tag = re.search(r'[<＜]/ROSAOS[>＞]', text)
-                # 使用正则匹配冒号 (支持中英文)
-                has_final_keyword = re.search(r"最终的罗莎回复[:：]", text)
-                
-                if not has_close_tag or not has_final_keyword:
-                    logger.warning("[SpectreCore] CoT 格式校验失败 (有开头但无结尾或关键字)，触发重试。")
-                    # 构造特殊错误信息，诱导 astrbot_plugin_cot 触发重试
-                    resp.completion_text = "调用失败: CoT 结构不完整，请检查 </ROSAOS> 闭合标签或 '最终的罗莎回复:' 关键字。"
-                    return
-
-            resp.completion_text = TextFilter.process_model_text(resp.completion_text, self.config)
-        except Exception as e:
-            logger.error(f"处理大模型回复错误: {e}")
-
-
-
-    @filter.on_decorating_result()
-    async def on_decorating_result(self, event: AstrMessageEvent):
-        try:
-            result = event.get_result()
-            if result and result.is_llm_result():
-                msg = "".join([comp.text for comp in result.chain if hasattr(comp, 'text')])
-                if "<NO_RESPONSE>" in msg:
-                    event.clear_result()
-                    logger.debug("触发 NO_RESPONSE，阻止发送")
-        except Exception as e:
-            logger.error(f"Decorating result error: {e}")
-
-    @filter.command_group("spectrecore", alias={'sc'})
-    def spectrecore(self): pass
-
-    @spectrecore.command("help")
-    async def help(self, event: AstrMessageEvent):
-        yield event.plain_result("SpectreCore Pro: \n/sc reset - 重置当前/指定历史\n/sc groupreset [群号] - 重置指定群\n/sc mute [分] - 闭嘴")
+    def _should_retry_response(self, result) -> bool:
+        if not result: return True
+        text = getattr(result, "completion_text", "") or ""
+        if not text and hasattr(result, "get_plain_text"): text = result.get_plain_text()
+        if not (text or "").strip(): return True
         
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @spectrecore.command("reset")
-    async def reset(self, event: AstrMessageEvent, group_id: str = None):
-        try:
-            platform = event.get_platform_name()
-            if group_id: is_priv, target_id = False, group_id
-            else: is_priv, target_id = event.is_private_chat(), (event.get_group_id() if not event.is_private_chat() else event.get_sender_id())
+        # Keyword-based detection
+        for kw in self.error_keywords:
+            if kw in text.lower(): return True
+        
+        # Regex-based detection (unified with intercept_api_error)
+        if self._has_api_error_pattern(text):
+            return True
             
-            if HistoryStorage.clear_history(platform, is_priv, target_id): yield event.plain_result("历史记录已重置。")
-            else: yield event.plain_result("重置失败。")
-        except Exception as e: yield event.plain_result(f"错误: {e}")
+        return False
+    
+    def _has_api_error_pattern(self, text: str) -> bool:
+        """统一的 API 错误检测逻辑（正则表达式）"""
+        if not text: return False
+        
+        # 1. AstrBot 失败标记
+        is_astrbot_fail = "AstrBot" in text and "请求失败" in text
+        if is_astrbot_fail: return True
+        
+        # 2. 错误模式匹配
+        error_patterns = [
+            r"Error\s*code:\s*5\d{2}",       # 500, 502, 503, 504...
+            r"APITimeoutError",
+            r"Request\s*timed\s*out",
+            r"InternalServerError",
+            r"count_token_failed",
+            r"bad_response_status_code",
+            r"connection\s*error",
+            r"remote\s*disconnected",
+            r"read\s*timeout",
+            r"connect\s*timeout"
+        ]
+        
+        combined_pattern = re.compile("|".join(error_patterns), re.IGNORECASE)
+        return bool(combined_pattern.search(text))
 
-    # [新增指令] 远程重置指定群组的历史记录
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @spectrecore.command("groupreset")
-    async def groupreset(self, event: AstrMessageEvent, group_id: str):
+    async def _fix_user_history(self, event: AstrMessageEvent, request_key: str, bot_reply: str = None):
         """
-        重置指定群组的历史记录
-        指令: /sc groupreset <群号>
+        Bug 1.3: Manually add the user's prompt to the conversation history
+        to prevent disjointed context (assistant -> assistant).
         """
         try:
-            if not group_id:
-                yield event.plain_result("请提供群号。用法: /sc groupreset <群号>")
-                return
+            stored_params = self.pending_requests.get(request_key)
+            if not stored_params: return
 
-            platform = event.get_platform_name()
-            # 强制指定为群聊模式 (is_private=False)
-            target_id = str(group_id)
+            conv_mgr = self.context.conversation_manager
+            umo = event.unified_msg_origin
+            cid = stored_params.get("conversation_id")
+            if not cid: cid = await conv_mgr.get_curr_conversation_id(umo)
             
-            if HistoryStorage.clear_history(platform, False, target_id):
-                yield event.plain_result(f"已重置群聊 {target_id} 的历史记录。")
-            else:
-                yield event.plain_result(f"重置失败：未找到群聊 {target_id} 的历史记录文件，或无需重置。")
+            conv = await conv_mgr.get_conversation(umo, cid)
+            prompt = stored_params.get("prompt")
+
+            if conv and prompt:
+                history_list = json.loads(conv.history) if conv.history else []
+                if not history_list or history_list[-1].get("content") != prompt:
+                    history_list.append({"role": "user", "content": prompt})
+                    logger.debug(f"已为会话 {cid} 手动补全用户历史记录")
+                
+                if bot_reply:
+                    history_list.append({"role": "assistant", "content": bot_reply})
+                    logger.debug(f"已为会话 {cid} 手动补全Bot回复历史记录")
+
+                await self.context.conversation_manager.update_conversation(
+                    unified_msg_origin=umo, conversation_id=cid, history=history_list
+                )
         except Exception as e:
-            yield event.plain_result(f"操作发生错误: {e}")
+            logger.error(f"手动补全历史记录时出错: {e}", exc_info=True)
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @spectrecore.command("mute")
-    async def mute(self, event: AstrMessageEvent, minutes: int = 5):
-        self.config.setdefault("_temp_mute", {})["until"] = time.time() + (minutes * 60)
-        self.config.save_config()
-        yield event.plain_result(f"闭嘴 {minutes} 分钟。")
+    async def _perform_retry_with_stored_params(self, request_key: str) -> Optional[Any]:
+        if request_key not in self.pending_requests: return None
+        stored = self.pending_requests[request_key]
+        provider = self.context.get_using_provider()
+        if not provider: return None
+        try:
+            kwargs = {k: stored.get(k) for k in ["prompt", "image_urls", "func_tool", "system_prompt"]}
+            
+            # Bug 1.1 & 1.2: Reconstruct conversation and contexts
+            conversation_id = stored.get("conversation_id")
+            unified_msg_origin = stored.get("unified_msg_origin")
+            
+            if conversation_id and unified_msg_origin:
+                conv_mgr = getattr(self.context, "conversation_manager", None)
+                if conv_mgr:
+                    conversation = await conv_mgr.get_conversation(unified_msg_origin, conversation_id)
+                    if conversation:
+                        kwargs["conversation"] = conversation
+                        # Restore sender info if needed
+                        if not hasattr(conversation, "metadata") or not conversation.metadata:
+                            conversation.metadata = {}
+                        conversation.metadata["sender"] = stored.get("sender", {})
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @spectrecore.command("unmute")
-    async def unmute(self, event: AstrMessageEvent):
-        if "_temp_mute" in self.config: del self.config["_temp_mute"]
-        self.config.save_config()
-        yield event.plain_result("解除闭嘴。")
+            # Bug 1.2: Context reconstruction
+            contexts = stored.get("contexts", [])
+            if stored.get("prompt"):
+                contexts.append({"role": "user", "content": stored["prompt"]})
+            kwargs["contexts"] = contexts
+            
+            kwargs.update(stored.get("provider_params", {}))
+            
+            # --- 核心修复：防御性调用 ---
+            return await provider.text_chat(**kwargs)
+            
+        except Exception as e:
+            logger.error(f"[IntelligentRetry] ⚠️ 重试尝试失败 (Provider API 抛出异常): {e}")
+            return None
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @spectrecore.command("callllm")
-    async def callllm(self, event: AstrMessageEvent):
-        yield await LLMUtils.call_llm(event, self.config, self.context)
+    async def _execute_retry_sequence(self, event: AstrMessageEvent, request_key: str) -> bool:
+        """
+        [Audited Fix] 执行重试循环
+        修正了异常吞噬问题，确保格式错误(ValueError)必定触发下一次重试。
+        """
+        delay = max(0, int(self.retry_delay))
+        session_id = event.unified_msg_origin
+        
+        for attempt in range(self.max_attempts):
+            current_attempt = attempt + 1
+            logger.warning(f"[IntelligentRetry] 🔄 (Session: {session_id}) 正在执行第 {current_attempt}/{self.max_attempts} 次重试...")
+            
+            # 1. 执行请求
+            new_response = await self._perform_retry_with_stored_params(request_key)
+            
+            # 2. 检查响应是否存在
+            if not new_response or not getattr(new_response, "completion_text", ""):
+                 logger.warning(f"[IntelligentRetry] ⚠️ 第 {current_attempt} 次重试返回空 (可能再次超时)")
+                 if current_attempt < self.max_attempts: await asyncio.sleep(delay * current_attempt)
+                 continue # 强制进入下一次循环
 
-    # [核心修复] 插件终止清理逻辑
+            raw_text = new_response.completion_text
+            
+            # 3. 结构安全检查 (Zero Trust)
+            try:
+                thought, reply = self._safe_process_response(raw_text)
+                # 如果能走到这里，说明结构合法
+            except ValueError as e:
+                # [Critical Fix] 捕获格式错误，绝对不能吞噬，必须 continue
+                logger.warning(f"格式错误，正在进行第 {current_attempt}/{self.max_attempts} 次重试...")
+                logger.warning(f"[IntelligentRetry] ⚠️ 第 {current_attempt} 次重试格式校验失败: {e} | 片段: {raw_text[:30]}...")
+                if current_attempt < self.max_attempts: await asyncio.sleep(delay * current_attempt)
+                continue # 强制进入下一次循环
+            
+            # 4. 内容关键词/API错误检查
+            if self._should_retry_response(new_response):
+                logger.warning(f"[IntelligentRetry] ⚠️ 第 {current_attempt} 次重试触发内容拦截 (API Error/Keywords)")
+                if current_attempt < self.max_attempts: await asyncio.sleep(delay * current_attempt)
+                continue # 强制进入下一次循环
+
+            # ================= 成功出口 =================
+            logger.info(f"[IntelligentRetry] ✅ 第 {current_attempt} 次重试成功")
+            
+            # A. 补全历史
+            await self._fix_user_history(event, request_key, bot_reply=reply)
+            
+            # B. 日志存储
+            log_payload = thought if thought else "[NO_THOUGHT_FLAG]"
+            await self._async_save_thought(session_id, log_payload)
+            
+            # C. 更新结果
+            final_res = MessageEventResult()
+            if self.display_cot_text and thought:
+                final_res.message(f"🤔 罗莎思考中：\n{thought}\n\n---\n\n{reply}")
+            else:
+                final_res.message(reply)
+                
+            final_res.result_content_type = ResultContentType.LLM_RESULT
+            event.set_result(final_res)
+            
+            # [Sync] 主动同步 Mnemosyne 计数器 (仅在重试成功时触发)
+            await self._notify_mnemosyne(event.unified_msg_origin)
+            
+            return True # 任务完成
+        
+        # 循环结束仍未返回 True，说明全部失败
+        logger.error(f"[IntelligentRetry] ❌ {self.max_attempts} 次重试全部失败。")
+        return False
+
+    async def _notify_mnemosyne(self, session_id: str):
+        """主动通知 Mnemosyne 增加计数器 (补偿重试导致的事件丢失)"""
+        try:
+            # 尝试获取 Mnemosyne 插件实例
+            mnemosyne = self.context.plugin_manager.get_plugin("Mnemosyne")
+            if not mnemosyne:
+                mnemosyne = self.context.plugin_manager.get_plugin("astrbot_plugin_mnemosyne")
+            
+            if mnemosyne and hasattr(mnemosyne, "msg_counter") and mnemosyne.msg_counter:
+                # 增加计数。Mnemosyne 的逻辑通常是:
+                # 1. on_llm_request -> +1 (User Message)
+                # 2. on_llm_response -> +1 (Assistant Message)
+                # 在重试场景下，User Message 的计数通常在第一次请求时已经加上了。
+                # 但由于重试拦截了原始的 response 事件，Assistant Message 的计数可能丢失。
+                # 因此这里补充一次计数。
+                mnemosyne.msg_counter.increment_counter(session_id)
+                logger.debug(f"[IntelligentRetry] 🔄 已同步 Mnemosyne 计数器 (Session: {session_id})")
+        except Exception as e:
+            logger.warning(f"[IntelligentRetry] ⚠️ 同步 Mnemosyne 计数器失败: {e}")
+
     async def terminate(self):
-        """插件终止时清理资源，防止内存泄漏"""
-        LLMUtils._llm_call_status.clear()
-        logger.info("[SpectreCore] 资源已释放。")
+        self._cleanup_task.cancel()
+        self.pending_requests.clear()
+        logger.info("[IntelligentRetry] 插件已卸载")
+
+# --- END OF FILE main.py ---
