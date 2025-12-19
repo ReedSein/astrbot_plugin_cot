@@ -586,9 +586,14 @@ class IntelligentRetryWithCoT(Star):
     async def _periodic_cleanup_task(self):
         while True:
             try:
-                await asyncio.sleep(300)
-                self.pending_requests.clear()
-            except Exception: break
+                await asyncio.sleep(60)
+                now = time.time()
+                keys_to_remove = [k for k, v in self.pending_requests.items() if now - v.get("timestamp", 0) > 300]
+                for k in keys_to_remove:
+                    if k in self.pending_requests:
+                        del self.pending_requests[k]
+            except Exception: 
+                await asyncio.sleep(10)
 
     def _parse_status_codes(self, codes_str: str) -> set:
         return {int(line.strip()) for line in codes_str.split("\n") if line.strip().isdigit()}
@@ -773,34 +778,11 @@ class IntelligentRetryWithCoT(Star):
             final_res.result_content_type = ResultContentType.LLM_RESULT
             event.set_result(final_res)
             
-            # [Sync] 主动同步 Mnemosyne 计数器 (仅在重试成功时触发)
-            await self._notify_mnemosyne(event.unified_msg_origin)
-            
             return True # 任务完成
         
         # 循环结束仍未返回 True，说明全部失败
         logger.error(f"[IntelligentRetry] ❌ {self.max_attempts} 次重试全部失败。")
         return False
-
-    async def _notify_mnemosyne(self, session_id: str):
-        """主动通知 Mnemosyne 增加计数器 (补偿重试导致的事件丢失)"""
-        try:
-            # 尝试获取 Mnemosyne 插件实例
-            mnemosyne = self.context.plugin_manager.get_plugin("Mnemosyne")
-            if not mnemosyne:
-                mnemosyne = self.context.plugin_manager.get_plugin("astrbot_plugin_mnemosyne")
-            
-            if mnemosyne and hasattr(mnemosyne, "msg_counter") and mnemosyne.msg_counter:
-                # 增加计数。Mnemosyne 的逻辑通常是:
-                # 1. on_llm_request -> +1 (User Message)
-                # 2. on_llm_response -> +1 (Assistant Message)
-                # 在重试场景下，User Message 的计数通常在第一次请求时已经加上了。
-                # 但由于重试拦截了原始的 response 事件，Assistant Message 的计数可能丢失。
-                # 因此这里补充一次计数。
-                mnemosyne.msg_counter.increment_counter(session_id)
-                logger.debug(f"[IntelligentRetry] 🔄 已同步 Mnemosyne 计数器 (Session: {session_id})")
-        except Exception as e:
-            logger.warning(f"[IntelligentRetry] ⚠️ 同步 Mnemosyne 计数器失败: {e}")
 
     async def terminate(self):
         self._cleanup_task.cancel()
