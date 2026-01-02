@@ -1,6 +1,7 @@
 # --- START OF FILE main.py ---
 
 import asyncio
+import copy
 import json
 import re
 import time
@@ -171,8 +172,16 @@ class IntelligentRetryWithCoT(Star):
         self.cot_start_tag = config.get("cot_start_tag", "<ROSAOS>")
         self.cot_end_tag = config.get("cot_end_tag", "</ROSAOS>")
         self.final_reply_pattern_str = config.get("final_reply_pattern", r"最终的罗莎回复[:：]?\s*")
+        self.tool_command_pattern_str = config.get(
+            "tool_command_pattern",
+            r"^\s*［调用工具[:：]\s*(?P<cmd>.+?)\s*］\s*$",
+        )
         
         self.FINAL_REPLY_PATTERN = re.compile(self.final_reply_pattern_str, re.IGNORECASE)
+        self.TOOL_COMMAND_PATTERN = re.compile(
+            self.tool_command_pattern_str,
+            re.IGNORECASE,
+        )
         
         # 构造灵活的标签检测正则，兼容中英文括号
         # 匹配规则：[<＜《(（] ROSAOS [>＞》)）]
@@ -330,6 +339,36 @@ class IntelligentRetryWithCoT(Star):
         for kw in self.filtered_keywords:
             reply = reply.replace(kw, "")
         return reply
+
+    def _extract_tool_command(self, text: str) -> Optional[str]:
+        if not text:
+            return None
+        match = self.TOOL_COMMAND_PATTERN.fullmatch(text.strip())
+        if not match:
+            return None
+        if "cmd" in match.groupdict():
+            cmd_text = match.group("cmd")
+        elif match.groups():
+            cmd_text = match.group(1)
+        else:
+            return None
+        return cmd_text.strip()
+
+    def _enqueue_command_event(self, event: AstrMessageEvent, cmd_text: str) -> None:
+        new_event = copy.copy(event)
+        new_event._extras = {}
+        new_event.clear_result()
+        new_event.message_str = cmd_text
+
+        msg_obj = new_event.message_obj
+        if msg_obj:
+            msg_obj = copy.copy(msg_obj)
+            msg_obj.message_str = cmd_text
+            msg_obj.message = [Comp.Plain(cmd_text)]
+            new_event.message_obj = msg_obj
+
+        new_event.should_call_llm(True)
+        self.context.get_event_queue().put_nowait(new_event)
     @event_filter.command("rosaos")
     async def get_rosaos_log(self, event: AstrMessageEvent, index: str = "1"):
         """获取内心OS"""
@@ -541,6 +580,29 @@ class IntelligentRetryWithCoT(Star):
                 # 如果全文判定非法（有标签无锚点），全量替换为兜底
                 result.chain.clear()
                 result.chain.append(Comp.Plain(self.fallback_reply))
+
+    @event_filter.on_decorating_result(priority=4)
+    async def dispatch_tool_command(self, event: AstrMessageEvent, *args):
+        result = event.get_result()
+        if not result or not result.chain or not result.is_llm_result():
+            return
+
+        plain_text = result.get_plain_text()
+        if not plain_text:
+            return
+
+        try:
+            _, reply = self._safe_process_response(plain_text)
+        except ValueError:
+            return
+
+        cmd_text = self._extract_tool_command(reply)
+        if not cmd_text:
+            return
+
+        self._silence_event(event)
+        event.stop_event()
+        self._enqueue_command_event(event, cmd_text)
 
     # --- Helper Methods ---
 
