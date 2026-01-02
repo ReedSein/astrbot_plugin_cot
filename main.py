@@ -172,15 +172,27 @@ class IntelligentRetryWithCoT(Star):
         self.cot_start_tag = config.get("cot_start_tag", "<ROSAOS>")
         self.cot_end_tag = config.get("cot_end_tag", "</ROSAOS>")
         self.final_reply_pattern_str = config.get("final_reply_pattern", r"最终的罗莎回复[:：]?\s*")
-        self.tool_command_pattern_str = config.get(
-            "tool_command_pattern",
-            r"^\s*［调用工具[:：]\s*(?P<cmd>.+?)\s*］\s*$",
+        self.incantation_tag = str(config.get("incantation_tag", "Incantatio")).strip()
+        self.incantation_fallback_reply = config.get(
+            "incantation_fallback_reply",
+            "咒语调用失败，请稍后再试。",
         )
         
         self.FINAL_REPLY_PATTERN = re.compile(self.final_reply_pattern_str, re.IGNORECASE)
-        self.TOOL_COMMAND_PATTERN = re.compile(
-            self.tool_command_pattern_str,
-            re.IGNORECASE,
+        self.INCANTATION_PATTERN = (
+            self._build_incantation_pattern(self.incantation_tag)
+            if self.incantation_tag
+            else None
+        )
+        self.INCANTATION_OPEN_PATTERN = (
+            self._build_incantation_open_pattern(self.incantation_tag)
+            if self.incantation_tag
+            else None
+        )
+        self.INCANTATION_CLOSE_PATTERN = (
+            self._build_incantation_close_pattern(self.incantation_tag)
+            if self.incantation_tag
+            else None
         )
         
         # 构造灵活的标签检测正则，兼容中英文括号
@@ -303,6 +315,36 @@ class IntelligentRetryWithCoT(Star):
 
     # --- Helper Methods ---
 
+    def _build_incantation_pattern(self, tag: str) -> re.Pattern:
+        tag_core = tag.strip("<>＜＞").strip()
+        tag_escaped = re.escape(tag_core)
+        open_brackets = r"[<＜]"
+        close_brackets = r"[>＞]"
+        slash = r"[\\/／]"
+        pattern = (
+            rf"{open_brackets}\s*{tag_escaped}\s*{close_brackets}"
+            rf"(?P<content>.*?)"
+            rf"{open_brackets}\s*{slash}\s*{tag_escaped}\s*{close_brackets}"
+        )
+        return re.compile(pattern, re.IGNORECASE | re.DOTALL)
+
+    def _build_incantation_open_pattern(self, tag: str) -> re.Pattern:
+        tag_core = tag.strip("<>＜＞").strip()
+        tag_escaped = re.escape(tag_core)
+        open_brackets = r"[<＜]"
+        close_brackets = r"[>＞]"
+        pattern = rf"{open_brackets}\s*{tag_escaped}\s*{close_brackets}"
+        return re.compile(pattern, re.IGNORECASE)
+
+    def _build_incantation_close_pattern(self, tag: str) -> re.Pattern:
+        tag_core = tag.strip("<>＜＞").strip()
+        tag_escaped = re.escape(tag_core)
+        open_brackets = r"[<＜]"
+        close_brackets = r"[>＞]"
+        slash = r"[\\/／]"
+        pattern = rf"{open_brackets}\s*{slash}\s*{tag_escaped}\s*{close_brackets}"
+        return re.compile(pattern, re.IGNORECASE)
+
     def _split_by_final_anchor(self, text: str) -> Optional[tuple[str, str]]:
         matches = list(self.FINAL_REPLY_PATTERN.finditer(text))
         if not matches:
@@ -340,19 +382,42 @@ class IntelligentRetryWithCoT(Star):
             reply = reply.replace(kw, "")
         return reply
 
-    def _extract_tool_command(self, text: str) -> Optional[str]:
-        if not text:
-            return None
-        match = self.TOOL_COMMAND_PATTERN.fullmatch(text.strip())
-        if not match:
-            return None
-        if "cmd" in match.groupdict():
-            cmd_text = match.group("cmd")
-        elif match.groups():
-            cmd_text = match.group(1)
-        else:
-            return None
-        return cmd_text.strip()
+    def _extract_incantation_commands(self, text: str) -> tuple[list[str], str]:
+        if not text or not self.INCANTATION_PATTERN:
+            return [], text
+
+        commands: list[str] = []
+
+        def _normalize_cmd(cmd: str) -> str:
+            return re.sub(r"\s+", " ", cmd).strip()
+
+        def _replacer(match: re.Match) -> str:
+            cmd_text = _normalize_cmd(match.group("content"))
+            if cmd_text:
+                commands.append(cmd_text)
+            return ""
+
+        cleaned = self.INCANTATION_PATTERN.sub(_replacer, text)
+        return commands, cleaned
+
+    def _has_incomplete_incantation_tag(self, text: str) -> bool:
+        if not text or not self.INCANTATION_PATTERN:
+            return False
+        open_matches = (
+            self.INCANTATION_OPEN_PATTERN.findall(text)
+            if self.INCANTATION_OPEN_PATTERN
+            else []
+        )
+        close_matches = (
+            self.INCANTATION_CLOSE_PATTERN.findall(text)
+            if self.INCANTATION_CLOSE_PATTERN
+            else []
+        )
+        if not open_matches and not close_matches:
+            return False
+        if not self.INCANTATION_PATTERN.search(text):
+            return True
+        return len(open_matches) != len(close_matches)
 
     def _enqueue_command_event(self, event: AstrMessageEvent, cmd_text: str) -> None:
         new_event = copy.copy(event)
@@ -369,6 +434,16 @@ class IntelligentRetryWithCoT(Star):
 
         new_event.should_call_llm(True)
         self.context.get_event_queue().put_nowait(new_event)
+
+    def _try_enqueue_command_event(self, event: AstrMessageEvent, cmd_text: str) -> bool:
+        try:
+            logger.info(f"[IntelligentRetry] ✨ 开始调用咒语指令: {cmd_text}")
+            self._enqueue_command_event(event, cmd_text)
+            logger.info(f"[IntelligentRetry] ✅ 咒语指令已入队: {cmd_text}")
+            return True
+        except Exception as e:
+            logger.warning(f"[IntelligentRetry] ❌ 咒语指令入队失败: {cmd_text} | {e}")
+            return False
     @event_filter.command("rosaos")
     async def get_rosaos_log(self, event: AstrMessageEvent, index: str = "1"):
         """获取内心OS"""
@@ -456,6 +531,11 @@ class IntelligentRetryWithCoT(Star):
             logger.warning(f"[IntelligentRetry] 🛡️ {e}")
             thought_content, reply_content = None, ""
             is_valid_structure = False
+        has_incomplete_incantation = self._has_incomplete_incantation_tag(raw_text)
+        if has_incomplete_incantation:
+            logger.warning(
+                "[IntelligentRetry] 🛡️ 检测到不完整的咒语标签，触发重试。",
+            )
 
         # 如果响应直接是空的或者带有错误标记，也视为需要重试
         is_tool_call = False
@@ -479,7 +559,14 @@ class IntelligentRetryWithCoT(Star):
         raw_str = str(getattr(resp, "raw_completion", "")).lower()
         is_error = "error" in raw_str and ("upstream" in raw_str or "500" in raw_str)
         
-        needs_retry = not is_tool_call and (not raw_text.strip() or self._should_retry_response(resp) or is_trunc or not is_valid_structure or is_error)
+        needs_retry = not is_tool_call and (
+            not raw_text.strip()
+            or self._should_retry_response(resp)
+            or is_trunc
+            or not is_valid_structure
+            or is_error
+            or has_incomplete_incantation
+        )
         
         if needs_retry:
             logger.info(f"[IntelligentRetry] 🔴 触发重试逻辑 (Key: {request_key})")
@@ -591,18 +678,21 @@ class IntelligentRetryWithCoT(Star):
         if not plain_text:
             return
 
-        try:
-            _, reply = self._safe_process_response(plain_text)
-        except ValueError:
+        commands, cleaned = self._extract_incantation_commands(plain_text)
+        if commands:
+            result.chain.clear()
+            if cleaned.strip():
+                result.chain.append(Comp.Plain(cleaned.strip()))
+            has_failure = False
+            for cmd_text in commands:
+                ok = self._try_enqueue_command_event(event, cmd_text)
+                if not ok:
+                    has_failure = True
+            if has_failure and self.incantation_fallback_reply:
+                result.chain.append(Comp.Plain(self.incantation_fallback_reply))
             return
 
-        cmd_text = self._extract_tool_command(reply)
-        if not cmd_text:
-            return
-
-        self._silence_event(event)
-        event.stop_event()
-        self._enqueue_command_event(event, cmd_text)
+        return
 
     # --- Helper Methods ---
 
@@ -814,6 +904,14 @@ class IntelligentRetryWithCoT(Star):
                 continue # 强制进入下一次循环
             
             # 4. 内容关键词/API错误检查
+            if self._has_incomplete_incantation_tag(raw_text):
+                logger.warning(
+                    f"[IntelligentRetry] ⚠️ 第 {current_attempt} 次重试检测到不完整咒语标签",
+                )
+                if current_attempt < self.max_attempts:
+                    await asyncio.sleep(delay * current_attempt)
+                continue
+
             if self._should_retry_response(new_response):
                 logger.warning(f"[IntelligentRetry] ⚠️ 第 {current_attempt} 次重试触发内容拦截 (API Error/Keywords)")
                 if current_attempt < self.max_attempts: await asyncio.sleep(delay * current_attempt)
