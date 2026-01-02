@@ -17,6 +17,12 @@
     "hint": "用于分割思维链和最终回复的正则表达式锚点。锚点前为思维链，锚点后为回复。",
     "default": "最终的罗莎回复[:：]?\\s*"
   },
+  "tool_command_pattern": {
+    "description": "工具指令文本正则",
+    "type": "string",
+    "hint": "匹配模型输出的工具指令文本；需包含捕获组（命名为 cmd 或第一个捕获组），例：［调用工具：/imago 一只小猫］。",
+    "default": "^\\s*［调用工具[:：]\\s*(?P<cmd>.+?)\\s*］\\s*$"
+  },
   "cot_start_tag": {
     "description": "思维链开始标签",
     "type": "string",
