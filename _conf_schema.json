@@ -17,11 +17,17 @@
     "hint": "用于分割思维链和最终回复的正则表达式锚点。锚点前为思维链，锚点后为回复。",
     "default": "最终的罗莎回复[:：]?\\s*"
   },
-  "tool_command_pattern": {
-    "description": "工具指令文本正则",
+  "incantation_tag": {
+    "description": "咒语标签名",
     "type": "string",
-    "hint": "匹配模型输出的工具指令文本；需包含捕获组（命名为 cmd 或第一个捕获组），例：［调用工具：/imago 一只小猫］。",
-    "default": "^\\s*［调用工具[:：]\\s*(?P<cmd>.+?)\\s*］\\s*$"
+    "hint": "用于包裹指令文本的标签名，实际匹配 <标签>...</标签>，大小写不敏感；请在系统提示词中明确要求模型使用该标签包裹指令。",
+    "default": "Incantatio"
+  },
+  "incantation_fallback_reply": {
+    "description": "咒语调用失败兜底回复",
+    "type": "string",
+    "hint": "当咒语指令入队失败时发送给用户的兜底文本。",
+    "default": "咒语调用失败，请稍后再试。"
   },
   "cot_start_tag": {
     "description": "思维链开始标签",
