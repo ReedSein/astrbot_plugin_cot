@@ -294,39 +294,34 @@ class IntelligentRetryWithCoT(Star):
 
     # --- Helper Methods ---
 
+    def _split_by_final_anchor(self, text: str) -> Optional[tuple[str, str]]:
+        matches = list(self.FINAL_REPLY_PATTERN.finditer(text))
+        if not matches:
+            return None
+        last = matches[-1]
+        thought = text[:last.start()].strip()
+        reply = text[last.end():].strip()
+        return thought, reply
+
     def _safe_process_response(self, text: str) -> tuple[Optional[str], str]:
         """
         [New Core] 安全响应处理
-        1. 贪婪匹配锚点 "最终的罗莎回复："
+        1. 使用配置的 FINAL_REPLY_PATTERN 进行最后锚点分割
         2. 零信任拦截：有标签无锚点 -> 抛出异常
         3. 放行：无标签无锚点 -> 返回 (None, text)
         """
-        if not text: return None, ""
+        if not text:
+            return None, ""
 
-        # 1. 构造贪婪正则 (严格匹配 "最终的罗莎回复：" 或 "最终的罗莎回复:")
-        # (?s) dot matches newline
-        # (.*) Group 1: Thought (Greedy)
-        # (最终的罗莎回复\s*[：:]) Group 2: Anchor
-        # (.*) Group 3: Reply
-        pattern = re.compile(r"(?s)(.*)(最终的罗莎回复\s*[：:])(.*)")
-        
-        match = pattern.match(text)
+        split = self._split_by_final_anchor(text)
+        if split:
+            thought, reply = split
+            return thought, self._finalize_reply_only(reply)
 
-        if match:
-            # 命中锚点 -> 提取思维与回复
-            thought = match.group(1).strip()
-            reply = match.group(3).strip()
-            return thought, self._finalize_reply_only(reply) # Clean keywords from reply
-        
-        # 未命中锚点 -> 进入安全检查
-        # 使用正则进行模糊匹配，兼容中英文括号
         has_tag = bool(self.COT_TAG_DETECTOR.search(text))
-        
         if has_tag:
-            # 有标签但无锚点 -> 格式错误/潜在泄露 -> 零信任拦截
-            raise ValueError(f"检测到思维链标签(或其变体)但缺失锚点，触发零信任拦截。")
-            
-        # 既无标签也无锚点 -> 放行
+            raise ValueError("检测到思维链标签(或其变体)但缺失锚点，触发零信任拦截。")
+
         return None, self._finalize_reply_only(text)
 
     def _finalize_reply_only(self, text: str) -> str:
@@ -520,15 +515,19 @@ class IntelligentRetryWithCoT(Star):
     async def final_cot_stripper(self, event: AstrMessageEvent, *args):
         """最后一道防线：全局清洗"""
         result = event.get_result()
-        if not result or not result.chain: return
+        if not result or not result.chain or not result.is_llm_result():
+            return
         
         # 获取全文进行判断，避免组件碎片化处理导致的部分替换、部分泄露
         plain_text = result.get_plain_text()
+        if not plain_text:
+            return
         
         # 使用正则进行模糊匹配，兼容中英文括号
         has_tag = bool(self.COT_TAG_DETECTOR.search(plain_text))
-        
-        if has_tag:
+        has_anchor = bool(self.FINAL_REPLY_PATTERN.search(plain_text))
+
+        if has_tag or has_anchor:
             try:
                 # 尝试对全文进行提取
                 _, reply = self._safe_process_response(plain_text)
