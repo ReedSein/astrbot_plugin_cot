@@ -432,6 +432,7 @@ class IntelligentRetryWithCoT(Star):
             msg_obj.message = [Comp.Plain(cmd_text)]
             new_event.message_obj = msg_obj
 
+        new_event.set_extra("incantation_command", True)
         new_event.should_call_llm(True)
         self.context.get_event_queue().put_nowait(new_event)
 
