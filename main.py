@@ -676,20 +676,20 @@ class IntelligentRetryWithCoT(Star):
         has_tag = bool(self.COT_TAG_DETECTOR.search(plain_text))
         has_anchor = bool(self.FINAL_REPLY_PATTERN.search(plain_text))
 
-            if has_tag or has_anchor:
-                try:
-                    # 尝试对全文进行提取
-                    _, reply = self._safe_process_response(plain_text)
-                    
-                    # 如果成功提取（找到了锚点），重构消息链只保留回复
-                    # 这是一个破坏性操作，但在防泄露场景下是必要的
-                    result.chain.clear()
-                    result.chain.append(Comp.Plain(reply))
-                    
-                except ValueError:
-                    # 如果全文判定非法（有标签无锚点），全量替换为兜底
-                    result.chain.clear()
-                    result.chain.append(Comp.Plain(self.fallback_reply))
+        if has_tag or has_anchor:
+            try:
+                # 尝试对全文进行提取
+                _, reply = self._safe_process_response(plain_text)
+
+                # 如果成功提取（找到了锚点），重构消息链只保留回复
+                # 这是一个破坏性操作，但在防泄露场景下是必要的
+                result.chain.clear()
+                result.chain.append(Comp.Plain(reply))
+
+            except ValueError:
+                # 如果全文判定非法（有标签无锚点），全量替换为兜底
+                result.chain.clear()
+                result.chain.append(Comp.Plain(self.fallback_reply))
 
     @event_filter.on_decorating_result(priority=4)
     async def dispatch_tool_command(self, event: AstrMessageEvent, *args):
