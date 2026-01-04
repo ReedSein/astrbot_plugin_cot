@@ -23,6 +23,12 @@
     "hint": "用于包裹指令文本的标签名，实际匹配 <标签>...</标签>，大小写不敏感；请在系统提示词中明确要求模型使用该标签包裹指令。",
     "default": "Incantatio"
   },
+  "clean_spectrecore_newlines": {
+    "description": "清理 SpectreCore LLM 换行",
+    "type": "bool",
+    "default": false,
+    "hint": "仅针对 spectrecorepro 插件的 LLM 回复，将所有换行折叠为单行（换行变空格）。"
+  },
   "incantation_fallback_reply": {
     "description": "咒语调用失败兜底回复",
     "type": "string",
