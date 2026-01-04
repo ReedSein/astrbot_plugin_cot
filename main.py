@@ -177,6 +177,7 @@ class IntelligentRetryWithCoT(Star):
             "incantation_fallback_reply",
             "咒语调用失败，请稍后再试。",
         )
+        self.clean_spectrecore_newlines = bool(config.get("clean_spectrecore_newlines", False))
         
         self.FINAL_REPLY_PATTERN = re.compile(self.final_reply_pattern_str, re.IGNORECASE)
         self.INCANTATION_PATTERN = (
@@ -419,6 +420,27 @@ class IntelligentRetryWithCoT(Star):
             return True
         return len(open_matches) != len(close_matches)
 
+    def _is_spectrecore_event(self, event: AstrMessageEvent) -> bool:
+        handlers = event.get_extra("activated_handlers", []) or []
+        for h in handlers:
+            if getattr(h, "handler_module_path", "").startswith(
+                "astrbot_plugin_spectrecorepro"
+            ):
+                return True
+        return False
+
+    def _normalize_newlines(self, text: str, event: AstrMessageEvent | None = None) -> str:
+        """
+        将所有换行折叠为单个空格，仅对 spectrecore 事件且开关开启时生效。
+        """
+        if not text or not self.clean_spectrecore_newlines:
+            return text
+        if event and not self._is_spectrecore_event(event):
+            return text
+        text = text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+        text = re.sub(r"[ \t]+", " ", text)
+        return text.strip()
+
     def _enqueue_command_event(self, event: AstrMessageEvent, cmd_text: str) -> None:
         new_event = copy.copy(event)
         new_event._extras = {}
@@ -654,20 +676,20 @@ class IntelligentRetryWithCoT(Star):
         has_tag = bool(self.COT_TAG_DETECTOR.search(plain_text))
         has_anchor = bool(self.FINAL_REPLY_PATTERN.search(plain_text))
 
-        if has_tag or has_anchor:
-            try:
-                # 尝试对全文进行提取
-                _, reply = self._safe_process_response(plain_text)
-                
-                # 如果成功提取（找到了锚点），重构消息链只保留回复
-                # 这是一个破坏性操作，但在防泄露场景下是必要的
-                result.chain.clear()
-                result.chain.append(Comp.Plain(reply))
-                
-            except ValueError:
-                # 如果全文判定非法（有标签无锚点），全量替换为兜底
-                result.chain.clear()
-                result.chain.append(Comp.Plain(self.fallback_reply))
+            if has_tag or has_anchor:
+                try:
+                    # 尝试对全文进行提取
+                    _, reply = self._safe_process_response(plain_text)
+                    
+                    # 如果成功提取（找到了锚点），重构消息链只保留回复
+                    # 这是一个破坏性操作，但在防泄露场景下是必要的
+                    result.chain.clear()
+                    result.chain.append(Comp.Plain(reply))
+                    
+                except ValueError:
+                    # 如果全文判定非法（有标签无锚点），全量替换为兜底
+                    result.chain.clear()
+                    result.chain.append(Comp.Plain(self.fallback_reply))
 
     @event_filter.on_decorating_result(priority=4)
     async def dispatch_tool_command(self, event: AstrMessageEvent, *args):
@@ -681,6 +703,7 @@ class IntelligentRetryWithCoT(Star):
 
         commands, cleaned = self._extract_incantation_commands(plain_text)
         if commands:
+            cleaned = self._normalize_newlines(cleaned, event)
             result.chain.clear()
             if cleaned.strip():
                 result.chain.append(Comp.Plain(cleaned.strip()))
@@ -694,6 +717,22 @@ class IntelligentRetryWithCoT(Star):
             return
 
         return
+
+    @event_filter.on_decorating_result(priority=-999)
+    async def normalize_spectrecore_newlines(self, event: AstrMessageEvent, *args):
+        if not self.clean_spectrecore_newlines:
+            return
+        if not self._is_spectrecore_event(event):
+            return
+        result = event.get_result()
+        if not result or not result.chain or not result.is_llm_result():
+            return
+        normalized = []
+        for comp in result.chain:
+            if isinstance(comp, Comp.Plain):
+                comp = Comp.Plain(self._normalize_newlines(comp.text, event))
+            normalized.append(comp)
+        result.chain = normalized
 
     # --- Helper Methods ---
 
