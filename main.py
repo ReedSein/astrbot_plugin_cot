@@ -431,14 +431,14 @@ class IntelligentRetryWithCoT(Star):
 
     def _normalize_newlines(self, text: str, event: AstrMessageEvent | None = None) -> str:
         """
-        将所有换行折叠为单个空格，仅对 spectrecore 事件且开关开启时生效。
+        将所有换行移除（与关键词过滤类似的“直接删除”方式），
+        仅对 spectrecore 事件且开关开启时生效。
         """
         if not text or not self.clean_spectrecore_newlines:
             return text
         if event and not self._is_spectrecore_event(event):
             return text
-        text = text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
-        text = re.sub(r"[ \t]+", " ", text)
+        text = text.replace("\r\n", "").replace("\r", "").replace("\n", "")
         return text.strip()
 
     def _enqueue_command_event(self, event: AstrMessageEvent, cmd_text: str) -> None:
@@ -703,7 +703,6 @@ class IntelligentRetryWithCoT(Star):
 
         commands, cleaned = self._extract_incantation_commands(plain_text)
         if commands:
-            cleaned = self._normalize_newlines(cleaned, event)
             result.chain.clear()
             if cleaned.strip():
                 result.chain.append(Comp.Plain(cleaned.strip()))
@@ -725,7 +724,12 @@ class IntelligentRetryWithCoT(Star):
         if not self._is_spectrecore_event(event):
             return
         result = event.get_result()
-        if not result or not result.chain or not result.is_llm_result():
+        if not result or not result.chain:
+            return
+        if result.result_content_type not in (
+            ResultContentType.LLM_RESULT,
+            ResultContentType.STREAMING_FINISH,
+        ):
             return
         normalized = []
         for comp in result.chain:
