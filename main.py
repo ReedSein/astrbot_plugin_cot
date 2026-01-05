@@ -444,6 +444,13 @@ class IntelligentRetryWithCoT(Star):
                 return True
         return False
 
+    def _resolve_event(self, event: Any, *args) -> Optional[AstrMessageEvent]:
+        if isinstance(event, AstrMessageEvent):
+            return event
+        if args and isinstance(args[0], AstrMessageEvent):
+            return args[0]
+        return None
+
     def _normalize_newlines(self, text: str, event: AstrMessageEvent | None = None) -> str:
         """
         将所有换行移除（与关键词过滤类似的“直接删除”方式），
@@ -650,6 +657,9 @@ class IntelligentRetryWithCoT(Star):
         [NEW] 异常拦截层 (Priority=20) - 物理静音版
         使用正则表达式强力捕获 Core 抛出的格式化异常。
         """
+        event = self._resolve_event(event, *args)
+        if not event:
+            return
         request_key = self._get_request_key(event)
         # Fix: 不要在这里做 pop 操作，否则重试中途如果并发触发，Key 没了会导致重试失败。
         # 依赖 _periodic_cleanup_task 清理即可。
@@ -690,6 +700,9 @@ class IntelligentRetryWithCoT(Star):
     @event_filter.on_decorating_result(priority=5)
     async def final_cot_stripper(self, event: AstrMessageEvent, *args):
         """最后一道防线：全局清洗"""
+        event = self._resolve_event(event, *args)
+        if not event:
+            return
         result = event.get_result()
         if not result or not result.chain or not result.is_llm_result():
             return
@@ -720,6 +733,9 @@ class IntelligentRetryWithCoT(Star):
 
     @event_filter.on_decorating_result(priority=4)
     async def dispatch_tool_command(self, event: AstrMessageEvent, *args):
+        event = self._resolve_event(event, *args)
+        if not event:
+            return
         result = event.get_result()
         if not result or not result.chain or not result.is_llm_result():
             return
@@ -746,6 +762,9 @@ class IntelligentRetryWithCoT(Star):
 
     @event_filter.on_decorating_result(priority=-999)
     async def normalize_spectrecore_newlines(self, event: AstrMessageEvent, *args):
+        event = self._resolve_event(event, *args)
+        if not event:
+            return
         if not self.clean_spectrecore_newlines:
             return
         if not self._is_spectrecore_event(event):
