@@ -26,7 +26,7 @@
   "clean_spectrecore_newlines": {
     "description": "清理 SpectreCore LLM 换行",
     "type": "bool",
-    "default": false,
+    "default": true,
     "hint": "仅针对 spectrecorepro 插件的 LLM 回复，将所有换行折叠为单行（换行变空格）。"
   },
   "incantation_fallback_reply": {
