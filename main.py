@@ -215,6 +215,12 @@ class IntelligentRetryWithCoT(Star):
         escaped_start = re.escape(self.cot_start_tag)
         escaped_end = re.escape(self.cot_end_tag)
         self.THOUGHT_TAG_PATTERN = re.compile(f'{escaped_start}(?P<content>.*?){escaped_end}', re.DOTALL)
+        self.DOSSIER_TAG_PATTERN = re.compile(
+            r"[<＜]\s*DOSSIER_UPDATE\s*[>＞].*?[<＜]/\s*DOSSIER_UPDATE\s*[>＞]",
+            re.IGNORECASE | re.DOTALL,
+        )
+        self.DOSSIER_OPEN_PATTERN = re.compile(r"[<＜]\s*DOSSIER_UPDATE\b", re.IGNORECASE)
+        self.DOSSIER_CLOSE_PATTERN = re.compile(r"[<＜]/\s*DOSSIER_UPDATE\b", re.IGNORECASE)
         
         self.display_cot_text = config.get("display_cot_text", False)
         self.filtered_keywords = config.get("filtered_keywords", ["呵呵，", "（……）"])
@@ -420,6 +426,16 @@ class IntelligentRetryWithCoT(Star):
             return True
         return len(open_matches) != len(close_matches)
 
+    def _has_incomplete_dossier_tag(self, text: str) -> bool:
+        if not text:
+            return False
+        if self.DOSSIER_TAG_PATTERN.search(text):
+            return False
+        return bool(
+            self.DOSSIER_OPEN_PATTERN.search(text)
+            or self.DOSSIER_CLOSE_PATTERN.search(text)
+        )
+
     def _is_spectrecore_event(self, event: AstrMessageEvent) -> bool:
         handlers = event.get_extra("activated_handlers", []) or []
         for h in handlers:
@@ -559,6 +575,11 @@ class IntelligentRetryWithCoT(Star):
             logger.warning(
                 "[IntelligentRetry] 🛡️ 检测到不完整的咒语标签，触发重试。",
             )
+        has_incomplete_dossier = self._has_incomplete_dossier_tag(raw_text)
+        if has_incomplete_dossier:
+            logger.warning(
+                "[IntelligentRetry] 🛡️ 检测到不完整的档案标签，触发重试。",
+            )
 
         # 如果响应直接是空的或者带有错误标记，也视为需要重试
         is_tool_call = False
@@ -569,6 +590,8 @@ class IntelligentRetryWithCoT(Star):
 
         request_key = self._get_request_key(event)
         if request_key not in self.pending_requests: return
+        if self._retry_guard_hit(request_key):
+            return
 
         # ================= [SpectreCore 绿灯通道] =================
         if "<NO_RESPONSE>" in raw_text:
@@ -589,11 +612,13 @@ class IntelligentRetryWithCoT(Star):
             or not is_valid_structure
             or is_error
             or has_incomplete_incantation
+            or has_incomplete_dossier
         )
         
         if needs_retry:
             logger.info(f"[IntelligentRetry] 🔴 触发重试逻辑 (Key: {request_key})")
-            
+            self._set_retry_guard(request_key)
+
             # 物理静音防止报错泄漏
             self._silence_event(event)
 
@@ -630,6 +655,8 @@ class IntelligentRetryWithCoT(Star):
         # Fix: 不要在这里做 pop 操作，否则重试中途如果并发触发，Key 没了会导致重试失败。
         # 依赖 _periodic_cleanup_task 清理即可。
         if request_key not in self.pending_requests: return
+        if self._retry_guard_hit(request_key):
+            return
 
         result = event.get_result()
         if not result: return
@@ -643,7 +670,8 @@ class IntelligentRetryWithCoT(Star):
         # 判定逻辑：如果检测到 API 错误或包含配置关键词
         if has_api_error or has_config_keyword:
             logger.warning(f"[IntelligentRetry] 🛡️ 拦截到 Core 异常 (Key: {request_key}) | 内容片段: {text[:50]}...")
-            
+            self._set_retry_guard(request_key)
+
             # --- CRITICAL FIX: 物理静音 ---
             # 必须彻底清空 Chain，否则 Core 可能会发送残余信息
             self._silence_event(event)
@@ -801,6 +829,15 @@ class IntelligentRetryWithCoT(Star):
         event._retry_plugin_request_key = key
         return key
 
+    def _retry_guard_hit(self, request_key: str) -> bool:
+        stored = self.pending_requests.get(request_key)
+        return bool(stored and stored.get("retry_guard"))
+
+    def _set_retry_guard(self, request_key: str) -> None:
+        stored = self.pending_requests.get(request_key)
+        if stored is not None:
+            stored["retry_guard"] = True
+
     def _should_retry_response(self, result) -> bool:
         if not result: return True
         text = getattr(result, "completion_text", "") or ""
@@ -951,6 +988,14 @@ class IntelligentRetryWithCoT(Star):
             if self._has_incomplete_incantation_tag(raw_text):
                 logger.warning(
                     f"[IntelligentRetry] ⚠️ 第 {current_attempt} 次重试检测到不完整咒语标签",
+                )
+                if current_attempt < self.max_attempts:
+                    await asyncio.sleep(delay * current_attempt)
+                continue
+
+            if self._has_incomplete_dossier_tag(raw_text):
+                logger.warning(
+                    f"[IntelligentRetry] ⚠️ 第 {current_attempt} 次重试检测到档案标签不完整",
                 )
                 if current_attempt < self.max_attempts:
                     await asyncio.sleep(delay * current_attempt)
