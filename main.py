@@ -439,9 +439,8 @@ class IntelligentRetryWithCoT(Star):
     def _is_spectrecore_event(self, event: AstrMessageEvent) -> bool:
         handlers = event.get_extra("activated_handlers", []) or []
         for h in handlers:
-            if getattr(h, "handler_module_path", "").startswith(
-                "astrbot_plugin_spectrecorepro"
-            ):
+            module_path = getattr(h, "handler_module_path", "") or ""
+            if "astrbot_plugin_spectrecorepro" in module_path:
                 return True
         return False
 
