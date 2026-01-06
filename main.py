@@ -1055,4 +1055,10 @@ class IntelligentRetryWithCoT(Star):
         self.pending_requests.clear()
         logger.info("[IntelligentRetry] 插件已卸载")
 
+
+class IntelligentRetryWithCoTPlugin(IntelligentRetryWithCoT):
+    """Compatibility shim for legacy loader."""
+
+    pass
+
 # --- END OF FILE main.py ---
