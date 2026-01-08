@@ -635,7 +635,7 @@ class IntelligentRetryWithCoT(Star):
                 resp.completion_text = res.get_plain_text() if res else ""
             else:
                 if self.fallback_reply:
-                    await event.send(Comp.Plain(self.fallback_reply))
+                    await event.send(event.plain_result(self.fallback_reply))
                     resp.completion_text = ""
         else:
             # 2. 成功提交 (Submission) - 仅在无需重试时执行
