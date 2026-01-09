@@ -524,7 +524,8 @@ class IntelligentRetryWithCoT(Star):
     @event_filter.on_llm_request(priority=70)
     async def store_llm_request(self, event: AstrMessageEvent, req, *args):
         """记录请求上下文"""
-        if not hasattr(req, "prompt"): return
+        if not hasattr(req, "prompt"):
+            return
         # 检查是否是排除命令（配置化）
         msg_lower = (event.message_str or "").strip().lower()
         if any(msg_lower.startswith(cmd) for cmd in self.exclude_retry_commands):
@@ -546,7 +547,8 @@ class IntelligentRetryWithCoT(Star):
 
         stored_params = {
             "prompt": req.prompt,
-            "contexts": getattr(req, "contexts", []),
+            # 避免后续阶段/插件对 req.contexts 的原地修改影响重试上下文
+            "contexts": copy.deepcopy(getattr(req, "contexts", [])),
             "image_urls": image_urls,
             "system_prompt": getattr(req, "system_prompt", ""),
             "func_tool": getattr(req, "func_tool", None),
@@ -565,6 +567,12 @@ class IntelligentRetryWithCoT(Star):
     async def process_and_retry_on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
         # 0. 原始数据获取
         raw_text = getattr(resp, "completion_text", "") or ""
+        # run_agent 异常分支会先触发 on_llm_response，然后再把 event.result 强制覆盖为 err_msg；
+        # 如果此处触发重试会导致：
+        # 1) 重试结果被覆盖（用户仍收到错误消息）
+        # 2) retry_guard 被提前设置，阻止 on_decorating_result 阶段的拦截重试
+        if getattr(resp, "role", None) == "err" and "AstrBot 请求失败" in raw_text:
+            return
 
         # 1. 安全处理 (Safe Processing)
         # 此时不修改 resp，也不写日志
@@ -936,7 +944,12 @@ class IntelligentRetryWithCoT(Star):
         provider = self.context.get_using_provider()
         if not provider: return None
         try:
-            kwargs = {k: stored.get(k) for k in ["prompt", "image_urls", "func_tool", "system_prompt"]}
+            kwargs = {
+                "prompt": stored.get("prompt"),
+                "image_urls": copy.deepcopy(stored.get("image_urls", [])),
+                "func_tool": stored.get("func_tool"),
+                "system_prompt": stored.get("system_prompt"),
+            }
             
             # Bug 1.1 & 1.2: Reconstruct conversation and contexts
             conversation_id = stored.get("conversation_id")
@@ -954,10 +967,9 @@ class IntelligentRetryWithCoT(Star):
                         conversation.metadata["sender"] = stored.get("sender", {})
 
             # Bug 1.2: Context reconstruction
-            contexts = stored.get("contexts", [])
-            if stored.get("prompt"):
-                contexts.append({"role": "user", "content": stored["prompt"]})
-            kwargs["contexts"] = contexts
+            # 注意：Provider.text_chat 在 prompt 与 contexts 同时存在时，会把 prompt 作为最新记录追加到 contexts 中。
+            # 这里必须避免对 stored["contexts"] 原地 append，否则多次重试会导致上下文膨胀/重复。
+            kwargs["contexts"] = copy.deepcopy(stored.get("contexts", []))
             
             kwargs.update(stored.get("provider_params", {}))
             
