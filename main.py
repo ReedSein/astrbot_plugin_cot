@@ -5,10 +5,8 @@ import copy
 import json
 import re
 import time
-import os
 import uuid
-import random
-from typing import Dict, Any, Optional, List
+from typing import Any, Dict, Optional
 from datetime import datetime
 from pathlib import Path
 
@@ -164,6 +162,7 @@ class IntelligentRetryWithCoT(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.pending_requests: Dict[str, Dict[str, Any]] = {}
+        self._thought_locks: Dict[str, asyncio.Lock] = {}
         
         self._cleanup_task = asyncio.create_task(self._periodic_cleanup_task())
         self._parse_config(config)
@@ -231,6 +230,7 @@ class IntelligentRetryWithCoT(Star):
         self.history_limit = int(config.get("history_limit", 100))
         self.summary_timeout = int(config.get("summary_timeout", 60))
         self.summary_prompt_template = config.get("summary_prompt_template", "总结日志：\n{log}")
+        self._api_error_pattern = self._build_api_error_regex()
 
         logger.info(f"[IntelligentRetry] 3.8.17 SpectreCore-GreenLight 已加载。")
 
@@ -282,6 +282,14 @@ class IntelligentRetryWithCoT(Star):
         except Exception: yield event.plain_result(f"【系统异常】\n{content}")
 
     # ======================= 存储层 =======================
+    def _get_thought_lock(self, session_id: str) -> asyncio.Lock:
+        safe_name = sanitize_filename(session_id)
+        lock = self._thought_locks.get(safe_name)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._thought_locks[safe_name] = lock
+        return lock
+
     async def _async_save_thought(self, session_id: str, content: str):
         if not session_id or not content: return
         def _write_impl():
@@ -302,7 +310,9 @@ class IntelligentRetryWithCoT(Star):
                 if len(thoughts) > self.history_limit: thoughts = thoughts[:self.history_limit]
                 with open(json_path, 'w', encoding='utf-8') as f: json.dump(thoughts, f, ensure_ascii=False, indent=2)
             except Exception: pass
-        await asyncio.to_thread(_write_impl)
+        lock = self._get_thought_lock(session_id)
+        async with lock:
+            await asyncio.to_thread(_write_impl)
 
     async def _async_read_thought(self, session_id: str, index: int) -> Optional[str]:
         def _read_impl():
@@ -318,7 +328,9 @@ class IntelligentRetryWithCoT(Star):
                     return "罗莎似乎并没有思考喵"
                 return content
             except Exception: return None
-        return await asyncio.to_thread(_read_impl)
+        lock = self._get_thought_lock(session_id)
+        async with lock:
+            return await asyncio.to_thread(_read_impl)
 
     # --- Helper Methods ---
 
@@ -847,6 +859,22 @@ class IntelligentRetryWithCoT(Star):
     def _parse_status_codes(self, codes_str: str) -> set:
         return {int(line.strip()) for line in codes_str.split("\n") if line.strip().isdigit()}
 
+    @staticmethod
+    def _build_api_error_regex() -> re.Pattern:
+        error_patterns = (
+            r"Error\s*code:\s*5\d{2}",
+            r"APITimeoutError",
+            r"Request\s*timed\s*out",
+            r"InternalServerError",
+            r"count_token_failed",
+            r"bad_response_status_code",
+            r"connection\s*error",
+            r"remote\s*disconnected",
+            r"read\s*timeout",
+            r"connect\s*timeout",
+        )
+        return re.compile("|".join(error_patterns), re.IGNORECASE)
+
     def _get_request_key(self, event: AstrMessageEvent) -> str:
         if hasattr(event, "_retry_plugin_request_key"): 
             return event._retry_plugin_request_key
@@ -887,23 +915,13 @@ class IntelligentRetryWithCoT(Star):
         # 1. AstrBot 失败标记
         is_astrbot_fail = "AstrBot" in text and "请求失败" in text
         if is_astrbot_fail: return True
-        
+
         # 2. 错误模式匹配
-        error_patterns = [
-            r"Error\s*code:\s*5\d{2}",       # 500, 502, 503, 504...
-            r"APITimeoutError",
-            r"Request\s*timed\s*out",
-            r"InternalServerError",
-            r"count_token_failed",
-            r"bad_response_status_code",
-            r"connection\s*error",
-            r"remote\s*disconnected",
-            r"read\s*timeout",
-            r"connect\s*timeout"
-        ]
-        
-        combined_pattern = re.compile("|".join(error_patterns), re.IGNORECASE)
-        return bool(combined_pattern.search(text))
+        pattern = getattr(self, "_api_error_pattern", None)
+        if pattern is None:
+            pattern = self._build_api_error_regex()
+            self._api_error_pattern = pattern
+        return bool(pattern.search(text))
 
     async def _fix_user_history(self, event: AstrMessageEvent, request_key: str, bot_reply: str = None):
         """
@@ -1063,8 +1081,16 @@ class IntelligentRetryWithCoT(Star):
         return False
 
     async def terminate(self):
-        self._cleanup_task.cancel()
+        if self._cleanup_task and not self._cleanup_task.done():
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.debug(f"[IntelligentRetry] 清理任务结束异常: {e}")
         self.pending_requests.clear()
+        self._thought_locks.clear()
         logger.info("[IntelligentRetry] 插件已卸载")
 
 # --- END OF FILE main.py ---
